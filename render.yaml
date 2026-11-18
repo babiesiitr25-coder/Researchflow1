@@ -1,0 +1,25 @@
+# Render Free Web Service (database hosted separately on Neon Free)
+services:
+  - type: web
+    name: researchflow-collaboration
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: OWNER_EMAIL
+        sync: false
+      - key: OWNER_PASSWORD
+        sync: false
+      - key: OWNER_NAME
+        value: Principal Researcher
+      - key: PGSSL
+        value: 'true'
+      # Optional: add OPENAI_API_KEY in Render dashboard for AI interpretation.
