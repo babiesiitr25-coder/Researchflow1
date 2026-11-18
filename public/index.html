@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0b1320" />
+  <title>ResearchFlow — Shared research workspace</title>
+  <meta name="description" content="A private workspace to track research projects, files, milestones and AI-assisted updates." />
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="auth" class="auth-screen hidden">
+    <div class="auth-art">
+      <div class="auth-brand"><span class="brand-symbol">✣</span> ResearchFlow<span class="brand-tm"> / LAB</span></div>
+      <div class="auth-art-content">
+        <div class="eyebrow light">A BETTER WAY TO RESEARCH TOGETHER</div>
+        <h1>One shared space.<br/><em>Every research breakthrough.</em></h1>
+        <p>From analytical derivations to numerical validation and manuscript submission, keep your collaboration in sync.</p>
+        <div class="auth-art-stats"><span>01 / Plan</span><span>02 / Document</span><span>03 / Advance</span></div>
+      </div>
+      <div class="auth-footer">PRIVATE RESEARCH WORKSPACE · 2026</div>
+    </div>
+    <div class="auth-form-area">
+      <div class="auth-mobile-brand"><span class="brand-symbol">✣</span> ResearchFlow</div>
+      <div class="auth-form-container" id="auth-form-container"></div>
+    </div>
+  </div>
+  <div id="workspace" class="workspace hidden">
+    <aside class="sidebar">
+      <div class="sidebar-logo"><span class="brand-symbol">✣</span><span>ResearchFlow<small>RESEARCH OPERATING SYSTEM</small></span></div>
+      <div class="workspace-switch"><span class="ws-avatar">G</span><span><strong>Geotechnical Research</strong><small>Shared workspace</small></span><span class="chevron">⌄</span></div>
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="nav" id="navigation" aria-label="Primary navigation">
+        <button data-page="overview" class="nav-link active"><span class="nav-symbol">▦</span> Overview</button>
+        <button data-page="tasks" class="nav-link"><span class="nav-symbol">☑</span> Task board</button>
+        <button data-page="agent" class="nav-link"><span class="nav-symbol">✧</span> AI research agent</button>
+        <button data-page="files" class="nav-link"><span class="nav-symbol">▤</span> Research library</button>
+        <button data-page="notes" class="nav-link"><span class="nav-symbol">≡</span> Lab notebook</button>
+        <button data-page="activity" class="nav-link"><span class="nav-symbol">◷</span> Activity timeline</button>
+      </nav>
+      <div class="nav-label">PROJECT PHASES</div>
+      <div id="sidebar-phases" class="sidebar-phases"></div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-foot"><div class="online-dot"></div><span>Connected to shared workspace</span></div>
+      <button id="logout" class="sidebar-account"><span id="my-avatar" class="avatar small"></span><span class="account-copy"><strong id="my-name"></strong><small id="my-role"></small></span><span class="logout-symbol" title="Sign out">⇥</span></button>
+    </aside>
+    <div class="app-area">
+      <header class="topbar"><div class="breadcrumb"><span>Workspace</span><span class="crumb-separator">/</span><strong id="breadcrumb-current">Overview</strong></div><div class="topbar-right"><span id="sync-status" class="sync-label"><span class="online-dot"></span> Synced</span><span class="topbar-divider"></span><span id="top-avatar" class="avatar small"></span></div></header>
+      <main id="content" class="content" tabindex="-1"></main>
+      <footer class="mobile-nav" id="mobile-nav"><button data-page="overview">▦<small>Home</small></button><button data-page="tasks">☑<small>Tasks</small></button><button data-page="agent">✧<small>Agent</small></button><button data-page="files">▤<small>Files</small></button><button data-page="notes">≡<small>Notes</small></button></footer>
+    </div>
+  </div>
+  <dialog id="task-dialog" class="dialog"><form id="task-form" class="dialog-inner"><div class="dialog-top"><div><div class="eyebrow">PROJECT WORK</div><h2 id="task-dialog-title">New task</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></div><input type="hidden" name="id" /><label>Task title<input name="title" class="field" required maxlength="180" placeholder="e.g. Validate analytical model in Abaqus" /></label><label>Description<textarea name="description" class="field" rows="3" maxlength="5000" placeholder="Scope, assumptions, deliverables..."></textarea></label><div class="form-grid"><label>Research phase<select name="phase" class="field"><option>Analytical</option><option>Numerical</option><option>Validation</option><option>Writing</option><option>Other</option></select></label><label>Assignee<select name="assigneeId" class="field" id="task-assign"></select></label><label>Status<select name="status" class="field"><option>To do</option><option>In progress</option><option>Blocked</option><option>Done</option></select></label><label>Priority<select name="priority" class="field"><option>Low</option><option selected>Medium</option><option>High</option></select></label><label>Due date<input name="dueDate" class="field" type="date" /></label></div><div class="dialog-actions"><button type="button" class="button secondary" data-close-dialog>Cancel</button><button type="submit" class="button solid" id="save-task">Save task</button></div></form></dialog>
+</body>
+</html>
