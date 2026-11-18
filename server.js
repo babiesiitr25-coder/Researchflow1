@@ -42,8 +42,16 @@ const priorities=['Low','Medium','High'];
 const phases=['Analytical','Numerical','Validation','Writing','Other'];
 const token=()=>crypto.randomBytes(28).toString('hex');
 const err=(res,msg,status=400)=>res.status(status).json({error:msg});
-function required(req,res,next){if(!req.session.userId)return err(res,'Sign in required',401);next();}
-function csrf(req,res,next){if(req.method==='GET'||req.path==='/api/auth/login'||req.path==='/api/auth/accept')return next();if(!req.session.userId)return err(res,'Sign in required',401);if(!req.session.csrf||req.get('X-CSRF-Token')!==req.session.csrf)return err(res,'Security token missing or expired',403);next();}
+const email = OWNER_EMAIL.trim().toLowerCase();
+const hash = await bcrypt.hash(OWNER_PASSWORD, 12);
+const existing = await q('SELECT id FROM users WHERE role=$1', ['owner']);
+if (!existing.rowCount) {
+  await q('INSERT INTO users(email,name,password_hash,role) VALUES($1,$2,$3,$4)', [email, OWNER_NAME, hash, 'owner']);
+  console.log('Research workspace owner account initialized.');
+} else {
+  await q('UPDATE users SET email=$1, name=$2, password_hash=$3 WHERE id=$4', [email, OWNER_NAME, hash, existing.rows[0].id]);
+  console.log('Research workspace owner account synced.');
+}
 app.use('/api',csrf);
 const userSafe=u=>({id:u.id,email:u.email,name:u.name,role:u.role});
 async function getUser(id){const r=await q('SELECT id,email,name,role FROM users WHERE id=$1',[id]);return r.rows[0];}
