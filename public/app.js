@@ -93,4 +93,17 @@ document.addEventListener('click',async e=>{
 document.addEventListener('input',e=>{if(e.target.id==='task-search'){state.search=e.target.value;$('task-table-target').innerHTML=table(filteredTasks());$('task-count').textContent='('+filteredTasks().length+' of '+state.data.tasks.length+')';}});
 document.addEventListener('change',e=>{if(e.target.id==='status-filter'){state.filter=e.target.value;render();}if(e.target.id==='phase-filter'){state.phaseFilter=e.target.value;render();}if(e.target.id==='file-input'&&e.target.files?.length)uploadFiles(e.target.files);});
 const drop=$('workspace');drop.addEventListener('dragover',e=>{const target=e.target.closest('#drop-zone');if(target){e.preventDefault();target.classList.add('dragover');}});drop.addEventListener('dragleave',e=>{const target=e.target.closest('#drop-zone');if(target)target.classList.remove('dragover');});drop.addEventListener('drop',e=>{const target=e.target.closest('#drop-zone');if(target){e.preventDefault();target.classList.remove('dragover');if(e.dataTransfer.files.length)uploadFiles(e.dataTransfer.files);}});
+$('task-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  const btn = $('save-task');
+  if (btn) btn.disabled = true;
+  try {
+    await createTask(e.target);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
 boot();
