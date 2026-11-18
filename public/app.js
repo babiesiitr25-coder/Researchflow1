@@ -88,22 +88,23 @@ document.addEventListener('click',async e=>{
   if(el.id==='dismiss-summary'){$('file-summary').innerHTML='';return;}
   if(el.id==='discard-actions'){state.pendingActions=[];render();return;}
   if(el.id==='confirm-actions'){if(state.busy)return;state.busy=true;await api('/agent/apply',{method:'POST',body:{actions:state.pendingActions}});state.messages.push({role:'assistant',text:'Confirmed. Your approved changes were saved to the shared workspace.'});state.pendingActions=[];state.busy=false;toast('Research workspace updated');await reload();return;}
+  if(el.id==='save-task'){
+    const form=$('task-form');
+    if(!form.reportValidity())return;
+    el.disabled=true;
+    try{
+      await createTask(form);
+    }catch(err){
+      toast(err.message,true);
+    }finally{
+      el.disabled=false;
+    }
+    return;
+  }
  }catch(error){state.busy=false;toast(error.message,true);if(el.hasAttribute('data-summarize'))el.disabled=false;}
 });
+
 document.addEventListener('input',e=>{if(e.target.id==='task-search'){state.search=e.target.value;$('task-table-target').innerHTML=table(filteredTasks());$('task-count').textContent='('+filteredTasks().length+' of '+state.data.tasks.length+')';}});
 document.addEventListener('change',e=>{if(e.target.id==='status-filter'){state.filter=e.target.value;render();}if(e.target.id==='phase-filter'){state.phaseFilter=e.target.value;render();}if(e.target.id==='file-input'&&e.target.files?.length)uploadFiles(e.target.files);});
 const drop=$('workspace');drop.addEventListener('dragover',e=>{const target=e.target.closest('#drop-zone');if(target){e.preventDefault();target.classList.add('dragover');}});drop.addEventListener('dragleave',e=>{const target=e.target.closest('#drop-zone');if(target)target.classList.remove('dragover');});drop.addEventListener('drop',e=>{const target=e.target.closest('#drop-zone');if(target){e.preventDefault();target.classList.remove('dragover');if(e.dataTransfer.files.length)uploadFiles(e.dataTransfer.files);}});
-$('task-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  const btn = $('save-task');
-  if (btn) btn.disabled = true;
-  try {
-    await createTask(e.target);
-  } catch (err) {
-    toast(err.message, true);
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-});
 boot();
