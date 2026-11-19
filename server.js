@@ -64,7 +64,18 @@ async function initialize(){
   await q(`CREATE TABLE IF NOT EXISTS notes(id SERIAL PRIMARY KEY,body TEXT NOT NULL,author_id INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW())`);
   await q(`CREATE TABLE IF NOT EXISTS research_files(id SERIAL PRIMARY KEY,original_name TEXT NOT NULL,mime_type TEXT NOT NULL,bytes INTEGER NOT NULL,content BYTEA NOT NULL,uploaded_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW())`);
   await q(`CREATE TABLE IF NOT EXISTS activities(id SERIAL PRIMARY KEY,actor_id INTEGER REFERENCES users(id),description TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW())`);
-  const email=OWNER_EMAIL.trim().toLowerCase();
+  
+  // Replace "workspace_files" with the exact table name used in your server.js
+await pool.query(`
+  ALTER TABLE workspace_files
+    ADD COLUMN IF NOT EXISTS reading_status VARCHAR(30) DEFAULT 'To Read',
+    ADD COLUMN IF NOT EXISTS project_phase VARCHAR(30) DEFAULT 'Other',
+    ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS citation_meta JSONB DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS user_notes TEXT DEFAULT '',
+    ADD COLUMN IF NOT EXISTS ai_review_data JSONB DEFAULT NULL;
+`);
+console.log('Literature review columns verified.');const email=OWNER_EMAIL.trim().toLowerCase();
   const hash=await bcrypt.hash(OWNER_PASSWORD,12);
   const existing=await q('SELECT id FROM users WHERE role=$1',['owner']);
   if(!existing.rowCount){
