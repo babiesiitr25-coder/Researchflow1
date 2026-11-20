@@ -1,922 +1,1320 @@
-import 'dotenv/config';
-import express from 'express';
-import session from 'express-session';
-import connectPgSimple from 'connect-pg-simple';
-import pg from 'pg';
-import bcrypt from 'bcryptjs';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import multer from 'multer';
-import crypto from 'node:crypto';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import pdf from 'pdf-parse';
-import mammoth from 'mammoth';
-
-const { Pool } = pg;
-const {
-  DATABASE_URL,
-  SESSION_SECRET,
-  OWNER_EMAIL,
-  OWNER_PASSWORD,
-  OWNER_NAME = 'Principal Researcher',
-  OPENAI_API_KEY,
-  OPENAI_MODEL = 'gpt-4o-mini',
-  PGSSL = 'false'
-} = process.env;
-
-for (const key of ['DATABASE_URL', 'SESSION_SECRET', 'OWNER_EMAIL', 'OWNER_PASSWORD']) {
-  if (!process.env[key]) {
-    console.error(`Missing required environment variable: ${key}`);
-    process.exit(1);
-  }
-}
-if (SESSION_SECRET.length < 32) {
-  console.error('SESSION_SECRET must be at least 32 characters.');
-  process.exit(1);
-}
-if (OWNER_PASSWORD.length < 12) {
-  console.error('OWNER_PASSWORD must be at least 12 characters.');
-  process.exit(1);
-}
-
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: PGSSL === 'true' ? { rejectUnauthorized: true } : undefined,
-  max: 10
-});
-
-const app = express();
-app.set('trust proxy', 1);
-app.disable('x-powered-by');
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'"],
-        fontSrc: ["'self'"],
-        objectSrc: ["'none'"],
-        frameAncestors: ["'none'"]
-      }
-    }
-  })
-);
-app.use(express.json({ limit: '150kb' }));
-
-const PgStore = connectPgSimple(session);
-app.use(
-  session({
-    store: new PgStore({ pool, tableName: 'user_sessions', createTableIfMissing: true }),
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    name: 'rf.sid',
-    cookie: {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 14 * 24 * 60 * 60 * 1000
-    }
-  })
-);
-
-const authLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 15,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: { error: 'Too many attempts. Try again later.' }
-});
-const aiLimit = rateLimit({
-  windowMs: 60 * 1000,
-  limit: 15,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: { error: 'Too many commands. Try again shortly.' }
-});
-
-const q = (s, params = []) => pool.query(s, params);
-const sha = s => crypto.createHash('sha256').update(s).digest('hex');
-const clean = s => String(s || '').trim();
-const statuses = ['To do', 'In progress', 'Blocked', 'Done'];
-const priorities = ['Low', 'Medium', 'High'];
-const phases = ['Analytical', 'Numerical', 'Validation', 'Writing', 'Other'];
-const readingStatuses = ['To Read', 'Skimming', 'Deep Read', 'Cited', 'Key Reference'];
-const token = () => crypto.randomBytes(28).toString('hex');
-const err = (res, msg, status = 400) => res.status(status).json({ error: msg });
-
-function required(req, res, next) {
-  if (!req.session?.userId) return err(res, 'Sign in required', 401);
-  next();
-}
-
-function csrf(req, res, next) {
-  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || req.path === '/auth/login' || req.path === '/auth/accept') {
-    return next();
-  }
-  const h = req.get('x-csrf-token');
-  if (!req.session?.csrf || !h || h !== req.session.csrf) {
-    return err(res, 'Invalid security token. Refresh the page.', 403);
-  }
-  next();
-}
-app.use('/api', csrf);
-
-const userSafe = u => ({ id: u.id, email: u.email, name: u.name, role: u.role });
-async function getUser(id) {
-  const r = await q('SELECT id,email,name,role FROM users WHERE id=$1', [id]);
-  return r.rows[0];
-}
-async function activity(client, actor, description) {
-  await client.query('INSERT INTO activities(actor_id,description) VALUES($1,$2)', [actor, description.slice(0, 450)]);
-}
-async function transaction(fn) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
-  }
-}
-
-async function initialize() {
-  await q(`CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY,email TEXT NOT NULL UNIQUE,name TEXT NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN('owner','collaborator')),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-  await q(`CREATE TABLE IF NOT EXISTS invitations(id SERIAL PRIMARY KEY,email TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_by INTEGER REFERENCES users(id),expires_at TIMESTAMPTZ NOT NULL,used_at TIMESTAMPTZ)`);
-  await q(`CREATE TABLE IF NOT EXISTS tasks(id SERIAL PRIMARY KEY,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',phase TEXT NOT NULL DEFAULT 'Other',status TEXT NOT NULL DEFAULT 'To do',priority TEXT NOT NULL DEFAULT 'Medium',assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,due_date DATE,created_by INTEGER REFERENCES users(id),updated_at TIMESTAMPTZ DEFAULT NOW(),created_at TIMESTAMPTZ DEFAULT NOW())`);
-  await q(`CREATE TABLE IF NOT EXISTS notes(id SERIAL PRIMARY KEY,body TEXT NOT NULL,author_id INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW())`);
-  await q(`CREATE TABLE IF NOT EXISTS research_files(id SERIAL PRIMARY KEY,original_name TEXT NOT NULL,mime_type TEXT NOT NULL,bytes INTEGER NOT NULL,content BYTEA NOT NULL,uploaded_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW())`);
-  await q(`CREATE TABLE IF NOT EXISTS activities(id SERIAL PRIMARY KEY,actor_id INTEGER REFERENCES users(id),description TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW())`);
-
-  // Step 2: Literature review metadata & AI caching columns on research_files
-  await q(`
-    ALTER TABLE research_files
-      ADD COLUMN IF NOT EXISTS reading_status VARCHAR(30) DEFAULT 'To Read',
-      ADD COLUMN IF NOT EXISTS project_phase VARCHAR(30) DEFAULT 'Other',
-      ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}',
-      ADD COLUMN IF NOT EXISTS citation_meta JSONB DEFAULT '{}'::jsonb,
-      ADD COLUMN IF NOT EXISTS user_notes TEXT DEFAULT '',
-      ADD COLUMN IF NOT EXISTS ai_review_data JSONB DEFAULT NULL
-  `);
-  console.log('Literature review columns verified.');
-
-  const email = OWNER_EMAIL.trim().toLowerCase();
-  const hash = await bcrypt.hash(OWNER_PASSWORD, 12);
-  const existing = await q('SELECT id FROM users WHERE role=$1', ['owner']);
-  if (!existing.rowCount) {
-    await q('INSERT INTO users(email,name,password_hash,role) VALUES($1,$2,$3,$4)', [email, OWNER_NAME, hash, 'owner']);
-    console.log('Research workspace owner account initialized.');
-  } else {
-    await q('UPDATE users SET email=$1,name=$2,password_hash=$3 WHERE id=$4', [email, OWNER_NAME, hash, existing.rows[0].id]);
-    console.log('Research workspace owner account synced.');
-  }
-}
-
-// --- Helper: Safe Text Extraction for PDF, DOCX, and Plain-Text/Code ---
-async function extractFileText(fileRow, maxChars = 40000) {
-  const extension = path.extname(fileRow.original_name).toLowerCase();
-  let rawText = '';
-
-  if (['.txt', '.csv', '.md', '.json', '.inp', '.dat', '.log', '.sta', '.msg', '.py'].includes(extension)) {
-    rawText = fileRow.content.toString('utf8');
-  } else if (extension === '.pdf') {
-    const parsed = await pdf(fileRow.content);
-    rawText = parsed.text || '';
-  } else if (extension === '.docx') {
-    const parsed = await mammoth.extractRawText({ buffer: fileRow.content });
-    rawText = parsed.value || '';
-  } else {
-    throw new Error('Text extraction supports PDF, DOCX, and plain-text/code files only.');
-  }
-
-  const normalized = clean(rawText).replace(/\s+/g, ' ');
-  if (!normalized || normalized.length < 40) {
-    throw new Error('Could not extract selectable text from this document (it may be a scanned image).');
-  }
-
-  if (normalized.length <= maxChars) {
-    return { text: normalized, truncated: false };
-  }
-
-  // Preserve front (Abstract, Intro, Methods) and back (Results, Conclusions)
-  const head = normalized.slice(0, Math.floor(maxChars * 0.7));
-  const tail = normalized.slice(-Math.floor(maxChars * 0.3));
-  return {
-    text: `${head}\n\n[... MIDDLE SECTIONS TRUNCATED TO FIT MODEL LIMIT ...]\n\n${tail}`,
-    truncated: true
-  };
-}
-
-// --- Auth Routes ---
-app.post('/api/auth/login', authLimit, async (req, res, next) => {
-  try {
-    const email = clean(req.body.email).toLowerCase();
-    const password = String(req.body.password || '');
-    const r = await q('SELECT * FROM users WHERE email=$1', [email]);
-    if (!r.rowCount || !(await bcrypt.compare(password, r.rows[0].password_hash))) {
-      return err(res, 'Invalid email or password', 401);
-    }
-    req.session.regenerate(e => {
-      if (e) return next(e);
-      req.session.userId = r.rows[0].id;
-      req.session.csrf = token();
-      res.json({ user: userSafe(r.rows[0]), csrf: req.session.csrf });
-    });
-  } catch (e) {
-    next(e);
-  }
-});
-
-app.post('/api/auth/accept', authLimit, async (req, res, next) => {
-  try {
-    const invite = String(req.body.token || '');
-    const name = clean(req.body.name);
-    const password = String(req.body.password || '');
-    if (!/^[a-f0-9]{56}$/.test(invite) || name.length < 2 || name.length > 90 || password.length < 12) {
-      return err(res, 'Valid invitation, name and a password of at least 12 characters are required');
-    }
-    const digest = sha(invite);
-    const hash = await bcrypt.hash(password, 12);
-    const user = await transaction(async c => {
-      const inv = await c.query(
-        'SELECT * FROM invitations WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW() FOR UPDATE',
-        [digest]
-      );
-      if (!inv.rowCount) throw new Error('Invitation is invalid, used, or expired');
-      await c.query("SELECT id FROM users WHERE role='owner' FOR UPDATE");
-      const memberCount = await c.query('SELECT count(*)::int AS total FROM users');
-      if (memberCount.rows[0].total >= 2) throw new Error('This two-person workspace is full');
-      const created = await c.query(
-        'INSERT INTO users(email,name,password_hash,role) VALUES($1,$2,$3,$4) RETURNING *',
-        [inv.rows[0].email, name, hash, 'collaborator']
-      );
-      await c.query('UPDATE invitations SET used_at=NOW() WHERE id=$1', [inv.rows[0].id]);
-      await activity(c, created.rows[0].id, 'Joined the research workspace');
-      return created.rows[0];
-    });
-    req.session.regenerate(e => {
-      if (e) return next(e);
-      req.session.userId = user.id;
-      req.session.csrf = token();
-      res.json({ user: userSafe(user), csrf: req.session.csrf });
-    });
-  } catch (e) {
-    if (e.code === '23505') return err(res, 'That email address already has an account');
-    if (/Invitation|workspace is full/i.test(e.message)) return err(res, e.message);
-    next(e);
-  }
-});
-
-app.get('/api/bootstrap', async (req, res, next) => {
-  try {
-    if (!req.session.userId) return res.json({ authenticated: false });
-    const user = await getUser(req.session.userId);
-    if (!user) {
-      req.session.destroy(() => {});
-      return res.json({ authenticated: false });
-    }
-    req.session.csrf ||= token();
-    res.json({
-      authenticated: true,
-      user,
-      csrf: req.session.csrf,
-      aiEnabled: !!clean(OPENAI_API_KEY)
-    });
-  } catch (e) {
-    next(e);
-  }
-});
-
-app.post('/api/auth/logout', required, (req, res, next) =>
-  req.session.destroy(e => (e ? next(e) : res.json({ ok: true })))
-);
-
-app.post('/api/auth/invite', required, authLimit, async (req, res, next) => {
-  try {
-    const user = await getUser(req.session.userId);
-    if (user?.role !== 'owner') return err(res, 'Only the owner can invite a colleague', 403);
-    const email = clean(req.body.email).toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-      return err(res, 'Provide a valid email address');
-    }
-    const members = await q('SELECT count(*)::int AS total FROM users');
-    if (members.rows[0].total >= 2) return err(res, 'Both workspace seats are occupied');
-    const secret = token();
-    await q(
-      "INSERT INTO invitations(email,token_hash,created_by,expires_at) VALUES($1,$2,$3,NOW()+INTERVAL '7 days')",
-      [email, sha(secret), user.id]
-    );
-    res.json({ invitePath: '/invite?token=' + secret, expiresIn: '7 days', email });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// --- Dashboard Data (Includes Literature Review Metadata) ---
-app.get('/api/dashboard', required, async (req, res, next) => {
-  try {
-    const [tasks, notes, files, activities, members] = await Promise.all([
-      q(`SELECT t.*,to_char(t.due_date,'YYYY-MM-DD') AS due_date,u.name AS assignee_name
-         FROM tasks t LEFT JOIN users u ON t.assignee_id=u.id
-         ORDER BY CASE t.status WHEN 'In progress' THEN 0 WHEN 'Blocked' THEN 1 WHEN 'To do' THEN 2 ELSE 3 END, t.updated_at DESC LIMIT 500`),
-      q(`SELECT n.id,n.body,n.created_at,u.name AS author_name
-         FROM notes n LEFT JOIN users u ON u.id=n.author_id
-         ORDER BY n.created_at DESC LIMIT 100`),
-      q(`SELECT f.id,f.original_name,f.mime_type,f.bytes,f.created_at,
-                f.reading_status,f.project_phase,f.tags,f.citation_meta,f.user_notes,f.ai_review_data,
-                u.name AS uploader_name
-         FROM research_files f LEFT JOIN users u ON u.id=f.uploaded_by
-         ORDER BY f.created_at DESC LIMIT 200`),
-      q(`SELECT a.id,a.description,a.created_at,u.name AS actor_name
-         FROM activities a LEFT JOIN users u ON u.id=a.actor_id
-         ORDER BY a.created_at DESC LIMIT 100`),
-      q('SELECT id,name,email,role FROM users ORDER BY id')
-    ]);
-    res.json({
-      tasks: tasks.rows,
-      notes: notes.rows,
-      files: files.rows,
-      activities: activities.rows,
-      members: members.rows
-    });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// --- Tasks Routes ---
-const taskFields = {
-  title: 'title',
-  description: 'description',
-  phase: 'phase',
-  status: 'status',
-  priority: 'priority',
-  assigneeId: 'assignee_id',
-  dueDate: 'due_date'
+const state = {
+  user: null,
+  workspace: null,
+  workspaces: [],
+  csrf: null,
+  aiEnabled: false,
+  authMode: 'login', // 'login' | 'register'
+  data: { tasks: [], notes: [], files: [], activities: [], members: [], maxSeats: 10 },
+  page: 'overview',
+  filter: 'All',
+  phaseFilter: 'All',
+  search: '',
+  // Literature library state
+  libSearch: '',
+  libStatusFilter: 'All',
+  libPhaseFilter: 'All',
+  libView: 'list',
+  selectedFiles: [],
+  activeReviewFileId: null,
+  comparisonPapers: null,
+  messages: [],
+  pendingActions: [],
+  busy: false
 };
 
-function normalTask(payload, partial = false) {
-  const out = {};
-  for (const [from, to] of Object.entries(taskFields)) {
-    if (Object.hasOwn(payload, from)) out[to] = payload[from];
-  }
-  if (!partial && (!clean(out.title) || clean(out.title).length > 180)) {
-    throw new Error('Task title is required (maximum 180 characters)');
-  }
-  if (Object.hasOwn(out, 'title')) {
-    out.title = clean(out.title);
-    if (!out.title || out.title.length > 180) throw new Error('Invalid task title');
-  }
-  if (Object.hasOwn(out, 'description')) {
-    out.description = clean(out.description);
-    if (out.description.length > 5000) throw new Error('Description is too long');
-  }
-  if (Object.hasOwn(out, 'status') && !statuses.includes(out.status)) throw new Error('Invalid status');
-  if (Object.hasOwn(out, 'priority') && !priorities.includes(out.priority)) throw new Error('Invalid priority');
-  if (Object.hasOwn(out, 'phase') && !phases.includes(out.phase)) throw new Error('Invalid phase');
-  if (Object.hasOwn(out, 'due_date') && out.due_date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(out.due_date)) {
-    throw new Error('Invalid due date');
-  }
-  if (Object.hasOwn(out, 'assignee_id') && out.assignee_id !== null && !Number.isInteger(Number(out.assignee_id))) {
-    throw new Error('Invalid assignee');
-  }
-  return out;
-}
+const $ = id => document.getElementById(id);
+const esc = value =>
+  String(value ?? '').replace(/[&<>"']/g, x => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[x]));
+const shortDate = d =>
+  d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+const timeDate = d =>
+  d ? new Date(d).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '—';
+const initials = name =>
+  String(name || '?')
+    .split(/\s+/)
+    .slice(0, 2)
+    .map(w => w[0])
+    .join('')
+    .toUpperCase();
 
-app.post('/api/tasks', required, async (req, res, next) => {
-  try {
-    const t = normalTask(req.body);
-    const r = await transaction(async c => {
-      if (t.assignee_id != null) {
-        const m = await c.query('SELECT id FROM users WHERE id=$1', [t.assignee_id]);
-        if (!m.rowCount) throw new Error('Invalid assignee');
-      }
-      const result = await c.query(
-        `INSERT INTO tasks(title,description,phase,status,priority,assignee_id,due_date,created_by)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-        [t.title, t.description || '', t.phase || 'Other', t.status || 'To do', t.priority || 'Medium', t.assignee_id || null, t.due_date || null, req.session.userId]
-      );
-      await activity(c, req.session.userId, `Created task: ${t.title}`);
-      return result.rows[0];
-    });
-    res.status(201).json(r);
-  } catch (e) {
-    if (/Invalid|title|long/i.test(e.message)) return err(res, e.message);
-    next(e);
-  }
-});
+const statuses = ['To do', 'In progress', 'Blocked', 'Done'];
+const phases = ['Analytical', 'Numerical', 'Validation', 'Writing', 'Other'];
+const readingStatuses = ['To Read', 'Skimming', 'Deep Read', 'Cited', 'Key Reference'];
 
-app.patch('/api/tasks/:id', required, async (req, res, next) => {
-  try {
-    const t = normalTask(req.body, true);
-    if (!Object.keys(t).length) return err(res, 'No changes supplied');
-    const saved = await transaction(async c => {
-      if (t.assignee_id != null) {
-        const m = await c.query('SELECT id FROM users WHERE id=$1', [t.assignee_id]);
-        if (!m.rowCount) throw new Error('Invalid assignee');
-      }
-      const fields = Object.keys(t);
-      const values = fields.map(k => t[k]);
-      const r = await c.query(
-        `UPDATE tasks SET ${fields.map((f, i) => `${f}=$${i + 1}`).join(',')},updated_at=NOW() WHERE id=$${fields.length + 1} RETURNING *`,
-        [...values, req.params.id]
-      );
-      if (!r.rowCount) throw new Error('Task not found');
-      await activity(c, req.session.userId, `Updated task: ${r.rows[0].title}${t.status ? ' → ' + t.status : ''}`);
-      return r.rows[0];
-    });
-    res.json(saved);
-  } catch (e) {
-    if (/Invalid|not found|long|title/i.test(e.message)) return err(res, e.message);
-    next(e);
-  }
-});
+const toast = (message, error = false) => {
+  const e = $('toast');
+  e.textContent = message;
+  e.className = 'toast show' + (error ? ' error' : '');
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => (e.className = 'toast'), 4300);
+};
 
-app.delete('/api/tasks/:id', required, async (req, res, next) => {
-  try {
-    await transaction(async c => {
-      const r = await c.query('DELETE FROM tasks WHERE id=$1 RETURNING title', [req.params.id]);
-      if (!r.rowCount) throw new Error('Task not found');
-      await activity(c, req.session.userId, 'Deleted task: ' + r.rows[0].title);
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    if (e.message === 'Task not found') return err(res, e.message, 404);
-    next(e);
-  }
-});
-
-// --- Lab Notebook Routes ---
-app.post('/api/notes', required, async (req, res, next) => {
-  try {
-    const body = clean(req.body.body);
-    if (!body || body.length > 10000) return err(res, 'Note must be 1–10000 characters');
-    const created = await transaction(async c => {
-      const r = await c.query('INSERT INTO notes(body,author_id) VALUES($1,$2) RETURNING *', [body, req.session.userId]);
-      await activity(c, req.session.userId, 'Added research note: ' + body.slice(0, 90));
-      return r.rows[0];
-    });
-    res.status(201).json(created);
-  } catch (e) {
-    next(e);
-  }
-});
-
-app.delete('/api/notes/:id', required, async (req, res, next) => {
-  try {
-    await transaction(async c => {
-      const r = await c.query('DELETE FROM notes WHERE id=$1 RETURNING id', [req.params.id]);
-      if (!r.rowCount) throw new Error('Note not found');
-      await activity(c, req.session.userId, 'Deleted a research note');
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    if (e.message === 'Note not found') return err(res, e.message, 404);
-    next(e);
-  }
-});
-
-// --- Research Library File Routes ---
-const uploads = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
-
-app.post('/api/files', required, uploads.single('file'), async (req, res, next) => {
-  try {
-    if (!req.file) return err(res, 'Choose a file');
-    const original = path.basename(req.file.originalname).slice(0, 240);
-    const allowed = /\.(pdf|docx|xlsx|csv|txt|md|json|inp|dat|log|sta|msg|odb|py|png|jpg|jpeg|zip)$/i;
-    if (!allowed.test(original)) return err(res, 'This file type is not supported');
-    const phase = phases.includes(req.body?.project_phase) ? req.body.project_phase : 'Other';
-
-    const stored = await transaction(async c => {
-      const r = await c.query(
-        `INSERT INTO research_files(original_name,mime_type,bytes,content,uploaded_by,project_phase)
-         VALUES($1,$2,$3,$4,$5,$6)
-         RETURNING id,original_name,mime_type,bytes,created_at,reading_status,project_phase,tags,citation_meta,user_notes,ai_review_data`,
-        [original, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.session.userId, phase]
-      );
-      await activity(c, req.session.userId, 'Uploaded file: ' + original);
-      return r.rows[0];
-    });
-    res.status(201).json(stored);
-  } catch (e) {
-    next(e);
-  }
-});
-
-app.get('/api/files/:id/download', required, async (req, res, next) => {
-  try {
-    const r = await q('SELECT original_name,mime_type,bytes,content FROM research_files WHERE id=$1', [req.params.id]);
-    if (!r.rowCount) return err(res, 'File not found', 404);
-    const f = r.rows[0];
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(f.original_name)}`);
-    res.setHeader('Content-Length', String(f.bytes));
-    res.send(f.content);
-  } catch (e) {
-    next(e);
-  }
-});
-
-// Update Literature Review Status, Phase, Tags, Citation, and Personal Notes
-app.patch('/api/files/:id/metadata', required, async (req, res, next) => {
-  try {
-    const { reading_status, project_phase, tags, user_notes, citation_meta } = req.body;
-
-    if (reading_status !== undefined && !readingStatuses.includes(reading_status)) {
-      return err(res, 'Invalid reading status');
-    }
-    if (project_phase !== undefined && !phases.includes(project_phase)) {
-      return err(res, 'Invalid project phase');
-    }
-    if (tags !== undefined && (!Array.isArray(tags) || tags.length > 25)) {
-      return err(res, 'Tags must be an array of up to 25 items');
-    }
-    if (user_notes !== undefined && String(user_notes).length > 20000) {
-      return err(res, 'Notes cannot exceed 20,000 characters');
-    }
-
-    const cleanTags = tags !== undefined ? tags.map(t => clean(t).slice(0, 40)).filter(Boolean) : null;
-
-    const updated = await transaction(async c => {
-      const r = await c.query(
-        `UPDATE research_files
-         SET reading_status = COALESCE($1, reading_status),
-             project_phase  = COALESCE($2, project_phase),
-             tags           = COALESCE($3, tags),
-             user_notes     = COALESCE($4, user_notes),
-             citation_meta  = COALESCE($5::jsonb, citation_meta)
-         WHERE id = $6
-         RETURNING id,original_name,mime_type,bytes,created_at,reading_status,project_phase,tags,citation_meta,user_notes,ai_review_data`,
-        [
-          reading_status ?? null,
-          project_phase ?? null,
-          cleanTags,
-          user_notes !== undefined ? String(user_notes) : null,
-          citation_meta !== undefined ? JSON.stringify(citation_meta) : null,
-          req.params.id
-        ]
-      );
-      if (!r.rowCount) throw new Error('File not found');
-      await activity(c, req.session.userId, `Updated literature metadata: ${r.rows[0].original_name}`);
-      return r.rows[0];
-    });
-
-    res.json(updated);
-  } catch (e) {
-    if (e.message === 'File not found') return err(res, e.message, 404);
-    next(e);
-  }
-});
-
-// Compare Multiple Selected Papers Side-by-Side
-app.post('/api/files/compare', required, async (req, res, next) => {
-  try {
-    const fileIds = Array.isArray(req.body.fileIds) ? req.body.fileIds.map(Number).filter(Number.isInteger) : [];
-    if (fileIds.length < 2 || fileIds.length > 10) {
-      return err(res, 'Select between 2 and 10 files to compare');
-    }
-    const r = await q(
-      `SELECT id, original_name, reading_status, project_phase, tags, citation_meta, user_notes, ai_review_data
-       FROM research_files WHERE id = ANY($1::int[]) ORDER BY created_at DESC`,
-      [fileIds]
-    );
-    res.json({ papers: r.rows });
-  } catch (e) {
-    next(e);
-  }
-});
-
-app.delete('/api/files/:id', required, async (req, res, next) => {
-  try {
-    await transaction(async c => {
-      const r = await c.query('DELETE FROM research_files WHERE id=$1 RETURNING original_name', [req.params.id]);
-      if (!r.rowCount) throw new Error('File not found');
-      await activity(c, req.session.userId, 'Deleted file: ' + r.rows[0].original_name);
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    if (e.message === 'File not found') return err(res, e.message, 404);
-    next(e);
-  }
-});
-
-// --- AI Research Agent Routes ---
-const commonWords = new Set(['i', 'we', 'the', 'and', 'for', 'all', 'with', 'have', 'was', 'our', 'this', 'that', 'now', 'are', 'from', 'into', 'today', 'done', 'completed', 'finished', 'started', 'update', 'task', 'mark', 'progress']);
-
-function matchTask(message, tasks) {
-  const m = message.toLowerCase();
-  return tasks
-    .map(t => ({
-      t,
-      score: t.title
-        .toLowerCase()
-        .split(/[^a-z0-9]+/)
-        .filter(w => w.length >= 3 && !commonWords.has(w) && m.includes(w)).length
-    }))
-    .sort((a, b) => b.score - a.score)[0];
-}
-
-function fallbackAgent(message, tasks) {
-  const trimmed = message.trim();
-  const low = trimmed.toLowerCase();
-  let actions = [];
-  let reply = '';
-  const add = trimmed.match(/^(?:add|create|new)\s+task\s*[:\-]\s*(.+)/i);
-  const note = trimmed.match(/^(?:note|log|research note)\s*[:\-]\s*(.+)/is);
-  if (add) {
-    actions = [{ type: 'add_task', title: add[1].slice(0, 180), phase: 'Other', priority: 'Medium' }];
-    reply = 'I can create this task. Review and confirm.';
-  } else if (note) {
-    actions = [{ type: 'add_note', body: note[1].slice(0, 10000) }];
-    reply = 'I can save this research note. Review and confirm.';
-  } else if (/\b(completed|finished|done|started|beginning|blocked)\b/.test(low)) {
-    const match = matchTask(low, tasks);
-    if (match?.score >= 1) {
-      const status = /completed|finished|done/.test(low) ? 'Done' : /blocked/.test(low) ? 'Blocked' : 'In progress';
-      actions = [{ type: 'update_task', taskId: match.t.id, status }];
-      reply = `Matched “${match.t.title}”. Review the proposed status change.`;
+async function api(path, { method = 'GET', body, form = false } = {}) {
+  const opts = { method, credentials: 'same-origin', headers: {} };
+  if (method !== 'GET' && state.csrf) opts.headers['X-CSRF-Token'] = state.csrf;
+  if (body !== undefined) {
+    if (form) {
+      opts.body = body;
     } else {
-      reply = 'No existing task confidently matches that update. Try “Add task: [name]” or create the task in the Tasks view.';
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
     }
-  } else if (/progress|summary|report|overview/i.test(low)) {
-    const done = tasks.filter(t => t.status === 'Done').length;
-    const active = tasks.filter(t => t.status === 'In progress').length;
-    const blocked = tasks.filter(t => t.status === 'Blocked').length;
-    reply = `Current project: ${tasks.length} tasks; ${done} complete, ${active} in progress, ${blocked} blocked. ${tasks.length ? Math.round((done / tasks.length) * 100) : 0}% completed. Outstanding tasks: ${tasks.filter(t => t.status !== 'Done').slice(0, 8).map(t => t.title).join('; ') || 'none'}.`;
-  } else {
-    reply = 'Quick command mode understands “Add task: ...”, “Note: ...”, “Completed [task]”, “Started [task]”, “Blocked [task]”, and “Show progress”. Add OPENAI_API_KEY in deployment Secrets to enable natural-language AI interpretation.';
   }
-  return { reply, actions, mode: 'quick-command' };
+  const response = await fetch('/api' + path, opts);
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    if (response.ok) throw Error('Unexpected server response');
+  }
+  if (!response.ok) {
+    if (response.status === 401) {
+      state.user = null;
+      authView();
+    }
+    throw Error(result.error || 'Request failed');
+  }
+  return result;
 }
 
-function validateActions(actions, tasks) {
-  return actions.slice(0, 8).flatMap(a => {
-    if (!a || typeof a !== 'object') return [];
-    if (a.type === 'add_task' && clean(a.title).length > 0 && clean(a.title).length <= 180) {
-      return [{
-        type: 'add_task',
-        title: clean(a.title),
-        description: clean(a.description || '').slice(0, 1500),
-        phase: phases.includes(a.phase) ? a.phase : 'Other',
-        priority: priorities.includes(a.priority) ? a.priority : 'Medium'
-      }];
+async function reload({ quiet = false } = {}) {
+  try {
+    const data = await api('/dashboard');
+    state.data = data;
+    if (data.workspace) state.workspace = data.workspace;
+    const validIds = new Set(data.files.map(f => f.id));
+    state.selectedFiles = state.selectedFiles.filter(id => validIds.has(id));
+    if (state.activeReviewFileId && !validIds.has(state.activeReviewFileId)) {
+      state.activeReviewFileId = null;
     }
-    if (a.type === 'add_note' && clean(a.body).length > 0) {
-      return [{ type: 'add_note', body: clean(a.body).slice(0, 10000) }];
-    }
-    if (a.type === 'update_task' && Number.isInteger(Number(a.taskId)) && tasks.some(t => t.id === Number(a.taskId)) && statuses.includes(a.status)) {
-      return [{ type: 'update_task', taskId: Number(a.taskId), status: a.status }];
-    }
-    return [];
-  });
+    renderWorkspaceHeader();
+    renderSidebar();
+    render();
+    $('sync-status').innerHTML = '<span class="online-dot"></span> Synced';
+  } catch (e) {
+    if (!quiet) toast(e.message, true);
+    $('sync-status').textContent = 'Sync unavailable';
+  }
 }
 
-async function openaiInterpret(message, tasks, notes, files) {
-  const apiKey = clean(OPENAI_API_KEY);
-  const sys = `You are a research-collaboration task assistant for a two-person geotechnical research workspace. Interpret the user's command based ONLY on supplied existing tasks, notes, and file names. Respond as a JSON object with keys "reply" (brief human-readable text) and "actions" (array, maximum 8). Actions are {"type":"add_task","title":"...","description":"...","phase":"Analytical|Numerical|Validation|Writing|Other","priority":"Low|Medium|High"} or {"type":"update_task","taskId":INTEGER,"status":"To do|In progress|Blocked|Done"} or {"type":"add_note","body":"..."}. Do NOT mutate anything unless specifically requested. Do NOT fabricate experiment results, file contents, completion statuses, numerical parameters, or task IDs. Never claim to have analyzed the actual contents of attached files: only filenames are provided. If the user asks for a summary, produce a read-only reply and actions=[]. If the request is ambiguous, explain and use actions=[]. A sentence saying someone did a completed piece of work may justify marking a clearly matching existing task Done; if unclear ask. Keep reply concise.`;
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: sys },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            message,
-            existingTasks: tasks.map(t => ({ id: t.id, title: t.title, status: t.status, phase: t.phase })),
-            recentNotes: notes.map(n => n.body.slice(0, 250)),
-            uploadedFileNames: files.map(f => f.original_name)
-          })
-        }
-      ]
-    }),
-    signal: AbortSignal.timeout(25000)
-  });
-  if (!r.ok) {
-    const body = await r.text();
-    throw new Error('AI service returned ' + r.status + ': ' + body.slice(0, 140));
+function authView() {
+  $('workspace').classList.add('hidden');
+  $('auth').classList.remove('hidden');
+  const params = new URLSearchParams(window.location.search);
+  const invite = params.get('token');
+  const el = $('auth-form-container');
+
+  if (invite) {
+    el.innerHTML = `
+      <div class="eyebrow">YOU'RE INVITED</div>
+      <h2>Join your research workspace</h2>
+      <p>Your teammate has invited you to collaborate. Create your account (or sign in with your invited email) to join.</p>
+      <form id="accept-invite-form">
+        <label>Your full name<input name="name" class="field" placeholder="Full name" required maxlength="90" /></label>
+        <label>Create password<input name="password" class="field" type="password" minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" required /></label>
+        <button class="button solid" type="submit">Accept invitation →</button>
+      </form>
+      <div class="mini-help">Invitation links expire after seven days and can only be used once.</div>`;
+    return;
   }
-  const raw = await r.json();
-  const parsed = JSON.parse(raw.choices?.[0]?.message?.content || '{}');
-  return {
-    reply: String(parsed.reply || 'Please review the suggested changes.').slice(0, 3000),
-    actions: validateActions(Array.isArray(parsed.actions) ? parsed.actions : [], tasks),
-    mode: 'ai'
+
+  if (state.authMode === 'register') {
+    el.innerHTML = `
+      <div class="eyebrow">OPEN RESEARCH OPERATING SYSTEM</div>
+      <h2>Create your workspace.</h2>
+      <p>Set up a private workspace for your lab, thesis, or research team in seconds.</p>
+      <form id="register-form">
+        <label>Your full name<input name="name" class="field" placeholder="Dr. Jane Doe" required maxlength="90" /></label>
+        <label>Workspace / lab name<input name="workspaceName" class="field" placeholder="e.g. Structural Dynamics Lab" required maxlength="100" /></label>
+        <label>Email address<input name="email" type="email" class="field" autocomplete="username" placeholder="researcher@institution.edu" required /></label>
+        <label>Password<input name="password" type="password" class="field" minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" required /></label>
+        <button class="button solid" type="submit">Create workspace →</button>
+      </form>
+      <div class="mini-help" style="margin-top:14px">
+        Already have an account? <button type="button" class="text-link" data-auth-mode="login">Sign in here →</button>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="eyebrow">RESEARCH COLLABORATION PLATFORM</div>
+    <h2>Welcome back.</h2>
+    <p>Sign in to access your research workspaces, literature reviews, and team tasks.</p>
+    <form id="login-form">
+      <label>Email address<input name="email" type="email" class="field" autocomplete="username" placeholder="researcher@institution.edu" required /></label>
+      <label>Password<input name="password" type="password" class="field" autocomplete="current-password" placeholder="Enter your password" required /></label>
+      <button class="button solid" type="submit">Sign in to workspace →</button>
+    </form>
+    <div class="mini-help" style="margin-top:14px">
+      New to ResearchFlow? <button type="button" class="text-link" data-auth-mode="register">Create a free workspace →</button>
+    </div>`;
+}
+
+function renderWorkspaceHeader() {
+  const ws = state.workspace || { name: 'Research Workspace', role: 'owner' };
+  const pill = document.querySelector('.workspace-pill');
+  if (!pill) return;
+  pill.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;width:100%">
+      <span class="workspace-badge">${esc(initials(ws.name).slice(0, 1))}</span>
+      <div style="flex:1;min-width:0">
+        <select id="workspace-switcher" aria-label="Switch workspace" style="width:100%;background:transparent;border:none;font-weight:600;font-size:13px;color:inherit;cursor:pointer;padding:0">
+          ${state.workspaces
+            .map(w => `<option value="${w.id}" ${w.id === ws.id ? 'selected' : ''}>${esc(w.name)}</option>`)
+            .join('')}
+          <option value="__new__">＋ Create new workspace…</option>
+        </select>
+        <small style="display:block;opacity:0.75;font-size:11px">${ws.role === 'owner' ? 'Workspace owner' : 'Shared workspace'}</small>
+      </div>
+    </div>`;
+}
+
+function showApp() {
+  $('auth').classList.add('hidden');
+  $('workspace').classList.remove('hidden');
+  const activeRole = state.workspace?.role || state.user.role || 'owner';
+  $('my-name').textContent = state.user.name;
+  $('my-role').textContent = activeRole === 'owner' ? 'Workspace owner' : 'Research collaborator';
+  $('my-avatar').textContent = initials(state.user.name);
+  $('top-avatar').textContent = initials(state.user.name);
+  renderWorkspaceHeader();
+  renderSidebar();
+  render();
+}
+
+function renderSidebar() {
+  const t = state.data.tasks;
+  const f = state.data.files;
+  $('sidebar-phases').innerHTML = phases
+    .map(p => {
+      const taskCount = t.filter(x => x.phase === p).length;
+      const fileCount = f.filter(x => (x.project_phase || 'Other') === p).length;
+      return `<div class="sidebar-phase" title="${taskCount} task(s), ${fileCount} file(s)"><span><span class="phase-dot"></span>${p}</span><span class="phase-count">${taskCount + fileCount}</span></div>`;
+    })
+    .join('');
+}
+
+function render() {
+  if (!state.user) return;
+  document.querySelectorAll('[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === state.page));
+  const names = {
+    overview: 'Overview',
+    tasks: 'Task board',
+    agent: 'AI research agent',
+    files: 'Research library',
+    notes: 'Lab notebook',
+    activity: 'Activity timeline',
+    team: 'Team'
   };
+  $('breadcrumb-current').textContent = names[state.page] || 'Overview';
+  $('content').innerHTML = (
+    {
+      overview: overviewPage,
+      tasks: tasksPage,
+      agent: agentPage,
+      files: filesPage,
+      notes: notesPage,
+      activity: activityPage,
+      team: teamPage
+    }[state.page] || overviewPage
+  )();
 }
 
-app.post('/api/agent/interpret', required, aiLimit, async (req, res, next) => {
-  try {
-    const message = clean(req.body.message);
-    if (!message || message.length > 3000) return err(res, 'Enter a command of up to 3000 characters');
-    const [tr, nr, fr] = await Promise.all([
-      q('SELECT id,title,status,phase FROM tasks ORDER BY updated_at DESC LIMIT 200'),
-      q('SELECT body FROM notes ORDER BY created_at DESC LIMIT 20'),
-      q('SELECT original_name FROM research_files ORDER BY created_at DESC LIMIT 30')
-    ]);
-    let result;
-    if (clean(OPENAI_API_KEY)) {
-      try {
-        result = await openaiInterpret(message, tr.rows, nr.rows, fr.rows);
-      } catch (e) {
-        console.error('AI interpretation error:', e.message);
-        result = fallbackAgent(message, tr.rows);
-        result.reply += ' (AI temporarily unavailable; using quick-command interpretation.)';
-      }
-    } else {
-      result = fallbackAgent(message, tr.rows);
-    }
-    res.json(result);
-  } catch (e) {
-    next(e);
-  }
-});
+function goto(page) {
+  state.page = page;
+  render();
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
 
-app.post('/api/agent/apply', required, async (req, res, next) => {
-  try {
-    const actions = req.body.actions;
-    if (!Array.isArray(actions) || actions.length === 0 || actions.length > 8) {
-      return err(res, 'Provide 1–8 proposed actions');
-    }
-    const tr = await q('SELECT id FROM tasks');
-    const safe = validateActions(actions, tr.rows);
-    if (safe.length !== actions.length) {
-      return err(res, 'One or more actions are invalid. Please request a new interpretation.');
-    }
-    await transaction(async c => {
-      for (const a of safe) {
-        if (a.type === 'add_task') {
-          await c.query('INSERT INTO tasks(title,description,phase,priority,created_by) VALUES($1,$2,$3,$4,$5)', [
-            a.title,
-            a.description,
-            a.phase,
-            a.priority,
-            req.session.userId
-          ]);
-          await activity(c, req.session.userId, 'AI-assisted: created task ' + a.title);
-        }
-        if (a.type === 'update_task') {
-          const r = await c.query('UPDATE tasks SET status=$1,updated_at=NOW() WHERE id=$2 RETURNING title', [
-            a.status,
-            a.taskId
-          ]);
-          if (!r.rowCount) throw new Error('Task disappeared; request a new interpretation');
-          await activity(c, req.session.userId, `AI-assisted: ${r.rows[0].title} → ${a.status}`);
-        }
-        if (a.type === 'add_note') {
-          await c.query('INSERT INTO notes(body,author_id) VALUES($1,$2)', [a.body, req.session.userId]);
-          await activity(c, req.session.userId, 'AI-assisted: added research note');
-        }
-      }
-    });
-    res.json({ ok: true, count: safe.length });
-  } catch (e) {
-    if (/Task disappeared|invalid/i.test(e.message)) return err(res, e.message);
-    next(e);
-  }
-});
+function pageHeading(kicker, title, description, actions = '') {
+  return `<div class="page-header"><div><div class="eyebrow">${esc(kicker)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${actions ? `<div class="page-actions">${actions}</div>` : ''}</div>`;
+}
 
-// --- Structured Literature Extraction + Caching (Upgrades Summarize) ---
-app.post('/api/agent/summarize-file/:id', required, aiLimit, async (req, res, next) => {
-  try {
-    const apiKey = clean(OPENAI_API_KEY);
-    if (!apiKey) return err(res, 'Set OPENAI_API_KEY in Render Environment to enable document analysis', 503);
+function statusPill(s) {
+  const cn = { 'To do': 'todo', 'In progress': 'progress', Done: 'done', Blocked: 'blocked' }[s] || 'todo';
+  return `<span class="pill ${cn}">${esc(s)}</span>`;
+}
 
-    const forceRefresh = Boolean(req.body?.forceRefresh);
-    const r = await q(
-      'SELECT id, original_name, content, bytes, tags, ai_review_data FROM research_files WHERE id=$1',
-      [req.params.id]
-    );
-    if (!r.rowCount) return err(res, 'File not found', 404);
-    const f = r.rows[0];
+function priorityPill(p) {
+  return `<span class="pill priority${esc((p || 'low').toLowerCase())}">${esc(p)}</span>`;
+}
 
-    // Return cached structured review + formatted summary if already stored
-    if (f.ai_review_data && !forceRefresh) {
-      return res.json({
-        cached: true,
-        summary: f.ai_review_data.formatted_summary || '',
-        review: f.ai_review_data,
-        truncated: Boolean(f.ai_review_data.truncated)
-      });
-    }
-
-    const { text: excerpt, truncated } = await extractFileText(f, 40000);
-
-    const sysPrompt = `You are a careful geotechnical and railway engineering research assistant.
-Analyze ONLY the provided document text. Do not fabricate equations, parameters, or results.
-Return ONLY valid JSON with these exact keys:
-{
-  "citation": {
-    "authors": "Author list from document",
-    "year": "Publication year",
-    "title": "Full paper or document title",
-    "journal": "Journal, conference, or source",
-    "bibtex": "Valid @article or @misc BibTeX entry"
-  },
-  "objective": "Primary research objective and problem statement",
-  "methodology": "Analytical, numerical (FEM/BEM/OGS), or experimental methodology and assumptions",
-  "governing_equations_and_params": "Key equations, soil/track parameters, and boundary conditions reported",
-  "key_findings": "Main quantitative and qualitative conclusions",
-  "limitations_and_gaps": "Limitations, assumptions, and open research questions",
-  "suggested_tags": ["short-tag-1", "short-tag-2", "short-tag-3"],
-  "formatted_summary": "A clear, structured Markdown literature review summary covering Objective, Methodology, Key Equations/Parameters, Main Findings, and Open Questions/Next Tasks."
-}`;
-
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: sysPrompt },
-          {
-            role: 'user',
-            content: `Filename: ${f.original_name}\n${truncated ? 'NOTE: Middle sections truncated due to document length.\n' : ''}\n${excerpt}`
-          }
-        ]
-      }),
-      signal: AbortSignal.timeout(45000)
-    });
-
-    if (!response.ok) {
-      const errDetail = await response.text();
-      console.error(`OpenAI Summarize Error (${response.status}):`, errDetail);
-      if (response.status === 401) {
-        return err(res, 'OpenAI rejected OPENAI_API_KEY (401 Unauthorized). Verify the key in Render Environment.', 502);
-      }
-      return err(res, `AI summary service failed with status ${response.status}`, 502);
-    }
-
-    const json = await response.json();
-    const parsed = JSON.parse(json.choices?.[0]?.message?.content || '{}');
-    parsed.truncated = truncated;
-    parsed.analyzed_at = new Date().toISOString();
-
-    const suggestedTags = Array.isArray(parsed.suggested_tags)
-      ? parsed.suggested_tags.map(t => clean(t).slice(0, 40)).filter(Boolean).slice(0, 8)
-      : [];
-
-    await q(
-      `UPDATE research_files
-       SET ai_review_data = $1::jsonb,
-           citation_meta  = $2::jsonb,
-           tags           = CASE WHEN COALESCE(array_length(tags, 1), 0) = 0 THEN $3 ELSE tags END
-       WHERE id = $4`,
-      [JSON.stringify(parsed), JSON.stringify(parsed.citation || {}), suggestedTags, f.id]
-    );
-
-    res.json({
-      cached: false,
-      summary: String(parsed.formatted_summary || 'No summary returned'),
-      review: parsed,
-      truncated
-    });
-  } catch (e) {
-    if (/Text extraction|Could not extract/i.test(e.message)) return err(res, e.message, 400);
-    next(e);
-  }
-});
-
-// --- Static Frontend Serving ---
-const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
-app.use(express.static(publicDir, { index: false, maxAge: '15m' }));
-app.get(['/', '/invite'], (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
-app.use('/api', (req, res) => err(res, 'Endpoint not found', 404));
-app.use((e, req, res, next) => {
-  console.error('Request error:', e);
-  if (e instanceof multer.MulterError) {
-    return err(res, e.code === 'LIMIT_FILE_SIZE' ? 'File exceeds 15 MB limit' : e.message, 413);
-  }
-  if (e instanceof SyntaxError && e.status === 400) return err(res, 'Invalid JSON');
-  return err(res, 'Unexpected server error', 500);
-});
-
-initialize()
-  .then(() =>
-    app.listen(Number(process.env.PORT || 3000), '0.0.0.0', () =>
-      console.log('ResearchFlow listening on port ' + (process.env.PORT || 3000))
+function table(tasks, limit = 0) {
+  const arr = limit ? tasks.slice(0, limit) : tasks;
+  if (!arr.length)
+    return `<div class="empty-state"><div class="empty-symbol">☷</div><strong>Nothing here yet</strong><span>Add a research task to start tracking progress.</span></div>`;
+  return `<div class="task-table-wrap"><table class="task-table"><thead><tr><th>Task</th><th>Research phase</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Due</th><th>Actions</th></tr></thead><tbody>${arr
+    .map(
+      t =>
+        `<tr><td><button class="text-link task-title" data-edit="${t.id}" title="Edit task">${esc(t.title)}</button></td><td>${esc(t.phase)}</td><td>${esc(t.assignee_name || 'Unassigned')}</td><td>${statusPill(t.status)}</td><td>${priorityPill(t.priority)}</td><td>${t.due_date ? shortDate(t.due_date + 'T12:00:00') : '—'}</td><td><div class="inline-actions"><button class="tiny-btn" data-edit="${t.id}">Edit</button>${t.status !== 'Done' ? `<button class="tiny-btn" data-complete="${t.id}" title="Mark completed">✓</button>` : ''}<button class="tiny-btn" data-delete-task="${t.id}" title="Delete task">✕</button></div></td></tr>`
     )
-  )
-  .catch(e => {
-    console.error('Could not initialize database:', e);
-    process.exit(1);
+    .join('')}</tbody></table></div>`;
+}
+
+function overviewPage() {
+  const tasks = state.data.tasks,
+    done = tasks.filter(t => t.status === 'Done').length,
+    active = tasks.filter(t => t.status === 'In progress').length,
+    blocked = tasks.filter(t => t.status === 'Blocked').length,
+    percent = tasks.length ? Math.round((100 * done) / tasks.length) : 0;
+  const current = tasks.filter(t => t.status !== 'Done');
+  const f = state.data.files;
+  const wsName = state.workspace?.name || 'Shared research workspace';
+  return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
+ <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
+ <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Completion is measured by completed tasks, not experimental validity or manuscript readiness.</p></section>
+ <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Validate numerical simulation results">＋ Add validation task</button></div></section></div>
+ <div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
+}
+
+function filteredTasks() {
+  let arr = state.data.tasks;
+  if (state.filter !== 'All') arr = arr.filter(t => t.status === state.filter);
+  if (state.phaseFilter !== 'All') arr = arr.filter(t => t.phase === state.phaseFilter);
+  if (state.search)
+    arr = arr.filter(t =>
+      [t.title, t.description, t.assignee_name, t.phase].join(' ').toLowerCase().includes(state.search.toLowerCase())
+    );
+  return arr;
+}
+
+function tasksPage() {
+  const total = state.data.tasks.length;
+  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Plan experiments, assign ownership, and track every milestone.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks or experiments..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${table(filteredTasks())}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
+}
+
+function agentPage() {
+  const messages = state.messages.length
+    ? state.messages
+    : [
+        {
+          role: 'assistant',
+          text: 'Welcome to your research copilot. I can turn updates into proposed task changes, create research notes, and summarize your project. Every write action requires your confirmation.'
+        }
+      ];
+  const proposals = state.pendingActions.length
+    ? `<div class="action-review"><strong>PROPOSED CHANGES · REVIEW BEFORE APPLYING</strong><ul>${state.pendingActions.map(a => `<li>${esc(describeAction(a))}</li>`).join('')}</ul><div class="action-buttons"><button class="button teal small" id="confirm-actions">✓ Apply ${state.pendingActions.length} update(s)</button><button class="button secondary small" id="discard-actions">Discard</button></div></div>`
+    : '';
+  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000"></textarea><button class="button solid" type="submit">Send ↗</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed literature review matrix”', '“Started numerical model validation”', '“Add task: Compare baseline boundary conditions”', '“Note: Agreed on mesh convergence tolerance”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal">${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
+}
+
+function describeAction(a) {
+  if (a.type === 'add_task') return 'Create task: ' + a.title;
+  if (a.type === 'add_note') return 'Add research note: ' + a.body.slice(0, 140);
+  if (a.type === 'update_task') {
+    const t = state.data.tasks.find(t => t.id === a.taskId);
+    return 'Set ' + (t?.title || 'task #' + a.taskId) + ' to ' + a.status;
+  }
+  return 'Unknown action';
+}
+
+// =========================================================================
+// LITERATURE REVIEW & RESEARCH LIBRARY
+// =========================================================================
+
+function filteredFiles() {
+  let arr = state.data.files || [];
+  if (state.libStatusFilter !== 'All') {
+    arr = arr.filter(f => (f.reading_status || 'To Read') === state.libStatusFilter);
+  }
+  if (state.libPhaseFilter !== 'All') {
+    arr = arr.filter(f => (f.project_phase || 'Other') === state.libPhaseFilter);
+  }
+  if (state.libSearch) {
+    const q = state.libSearch.toLowerCase();
+    arr = arr.filter(f => {
+      const rev = f.ai_review_data || {};
+      const cit = f.citation_meta || {};
+      return [
+        f.original_name,
+        f.uploader_name,
+        f.reading_status,
+        f.project_phase,
+        (f.tags || []).join(' '),
+        f.user_notes,
+        cit.authors,
+        cit.title,
+        cit.year,
+        rev.objective,
+        rev.methodology,
+        rev.key_findings
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(q);
+    });
+  }
+  return arr;
+}
+
+function isTextExtractable(filename) {
+  return /\.(pdf|docx|txt|csv|md|json|inp|dat|log|sta|msg|py)$/i.test(filename);
+}
+
+function renderFileListOrMatrix(files) {
+  if (!files.length) {
+    return empty(
+      '▤',
+      state.data.files.length ? 'No matching papers' : 'No research files yet',
+      state.data.files.length
+        ? 'Try clearing your search or status/phase filters.'
+        : 'Upload your first research document and it will appear here for your team.'
+    );
+  }
+
+  if (state.libView === 'matrix') {
+    return `<div class="task-table-wrap"><table class="task-table">
+      <thead>
+        <tr>
+          <th style="width:28px"><input type="checkbox" id="select-all-files" ${files.every(f => state.selectedFiles.includes(f.id)) ? 'checked' : ''} /></th>
+          <th>Paper / File</th>
+          <th>Phase & Status</th>
+          <th>Objective & Methodology</th>
+          <th>Equations & Parameters</th>
+          <th>Key Findings & Gaps</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${files
+          .map(f => {
+            const rev = f.ai_review_data;
+            const cit = f.citation_meta || {};
+            const checked = state.selectedFiles.includes(f.id);
+            return `<tr>
+              <td><input type="checkbox" data-select-file="${f.id}" ${checked ? 'checked' : ''} /></td>
+              <td style="min-width:170px">
+                <strong>${esc(f.original_name)}</strong>
+                ${cit.authors || cit.year ? `<div class="small-text muted">${esc(cit.authors || '')} ${cit.year ? `(${esc(cit.year)})` : ''}</div>` : ''}
+                <div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:4px">
+                  ${(f.tags || []).map(t => `<span class="meta-tag" style="font-size:10px;padding:1px 6px">#${esc(t)}</span>`).join('')}
+                </div>
+              </td>
+              <td style="min-width:130px">
+                <select class="field" style="padding:4px 6px;font-size:11px;margin-bottom:5px" data-file-status="${f.id}">
+                  ${readingStatuses.map(s => `<option ${f.reading_status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+                </select>
+                <select class="field" style="padding:4px 6px;font-size:11px" data-file-phase="${f.id}">
+                  ${phases.map(p => `<option ${(f.project_phase || 'Other') === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+                </select>
+              </td>
+              <td style="min-width:210px;max-width:260px;white-space:normal;font-size:12px">
+                ${
+                  rev
+                    ? `<div><strong>Obj:</strong> ${esc((rev.objective || '—').slice(0, 140))}${rev.objective?.length > 140 ? '…' : ''}</div>
+                       <div style="margin-top:4px"><strong>Method:</strong> ${esc((rev.methodology || '—').slice(0, 140))}${rev.methodology?.length > 140 ? '…' : ''}</div>`
+                    : `<span class="muted">Not extracted yet. Click <strong>Analyze</strong>.</span>`
+                }
+              </td>
+              <td style="min-width:180px;max-width:230px;white-space:normal;font-size:12px">
+                ${rev ? esc((rev.governing_equations_and_params || '—').slice(0, 180)) + (rev.governing_equations_and_params?.length > 180 ? '…' : '') : '<span class="muted">—</span>'}
+              </td>
+              <td style="min-width:210px;max-width:260px;white-space:normal;font-size:12px">
+                ${
+                  rev
+                    ? `<div><strong>Findings:</strong> ${esc((rev.key_findings || '—').slice(0, 140))}${rev.key_findings?.length > 140 ? '…' : ''}</div>
+                       <div style="margin-top:4px" class="muted"><strong>Gaps:</strong> ${esc((rev.limitations_and_gaps || '—').slice(0, 110))}</div>`
+                    : '<span class="muted">—</span>'
+                }
+              </td>
+              <td>
+                <div class="inline-actions" style="flex-wrap:wrap">
+                  <button class="tiny-btn" data-open-review="${f.id}">${rev ? '✧ Review' : '✧ Analyze'}</button>
+                  <button class="tiny-btn" data-copy-bibtex="${f.id}" title="Copy BibTeX">📋 BibTeX</button>
+                  <button class="tiny-btn" data-download="${f.id}" title="Download">↓</button>
+                </div>
+              </td>
+            </tr>`;
+          })
+          .join('')}
+      </tbody>
+    </table></div>`;
+  }
+
+  return `<div class="file-list">${files
+    .map(f => {
+      const hasReview = Boolean(f.ai_review_data);
+      const hasNotes = Boolean((f.user_notes || '').trim());
+      const checked = state.selectedFiles.includes(f.id);
+      const cit = f.citation_meta || {};
+      const tags = Array.isArray(f.tags) ? f.tags : [];
+      return `<div class="file-item" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:10px;padding-top:4px">
+          <input type="checkbox" data-select-file="${f.id}" ${checked ? 'checked' : ''} title="Select for side-by-side comparison" />
+          <span class="file-type">${esc(f.original_name.split('.').pop().slice(0, 5).toUpperCase())}</span>
+        </div>
+        <div class="file-info" style="min-width:220px;flex:1">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong title="${esc(f.original_name)}">${esc(f.original_name)}</strong>
+            ${hasReview ? `<span class="pill done" style="font-size:10px;padding:1px 7px">✓ Extracted</span>` : ''}
+            ${hasNotes ? `<span class="pill progress" style="font-size:10px;padding:1px 7px">📝 Notes</span>` : ''}
+          </div>
+          <small style="display:block;margin-top:2px">
+            ${esc(f.uploader_name)} · ${shortDate(f.created_at)} · ${formatBytes(f.bytes)}
+            ${cit.authors || cit.year ? ` · <em>${esc(cit.authors || '')}${cit.year ? ' (' + esc(cit.year) + ')' : ''}</em>` : ''}
+          </small>
+          ${
+            tags.length
+              ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">
+                  ${tags.map(t => `<span class="meta-tag" style="font-size:10px;padding:1px 7px">#${esc(t)}</span>`).join('')}
+                </div>`
+              : ''
+          }
+        </div>
+        <div class="file-actions" style="flex-wrap:wrap;gap:6px;align-items:center">
+          <select class="field" style="width:auto;padding:4px 8px;font-size:11px" data-file-status="${f.id}" title="Reading status">
+            ${readingStatuses.map(s => `<option ${(f.reading_status || 'To Read') === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          </select>
+          <select class="field" style="width:auto;padding:4px 8px;font-size:11px" data-file-phase="${f.id}" title="Project phase">
+            ${phases.map(p => `<option ${(f.project_phase || 'Other') === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+          </select>
+          ${
+            isTextExtractable(f.original_name)
+              ? `<button class="button secondary small" data-open-review="${f.id}">${hasReview ? '✧ View Review' : '✧ Analyze'}</button>`
+              : `<button class="button secondary small" data-open-review="${f.id}">📝 Notes</button>`
+          }
+          <button class="button secondary small" data-copy-bibtex="${f.id}" title="Copy BibTeX citation">📋 BibTeX</button>
+          <button class="button secondary small" data-download="${f.id}">↓ Download</button>
+          <button class="button ghost small" data-delete-file="${f.id}">Delete</button>
+        </div>
+      </div>`;
+    })
+    .join('')}</div>`;
+}
+
+function renderActiveReviewDrawer() {
+  if (!state.activeReviewFileId) return '';
+  const f = state.data.files.find(x => x.id === state.activeReviewFileId);
+  if (!f) return '';
+  const rev = f.ai_review_data;
+  const cit = f.citation_meta || {};
+  const extractable = isTextExtractable(f.original_name);
+
+  return `<div id="file-summary" class="card panel section-spacer" style="border-left:3px solid var(--accent,#0d9488)">
+    <div class="panel-heading" style="flex-wrap:wrap;gap:8px">
+      <span>✧ Literature Review & Notes · <strong>${esc(f.original_name)}</strong></span>
+      <div class="inline-actions" style="flex-wrap:wrap">
+        ${
+          extractable
+            ? `<button class="button secondary small" data-summarize="${f.id}" data-force="${rev ? '1' : '0'}" ${state.aiEnabled ? '' : 'disabled'}>
+                ${rev ? '↻ Re-analyze Paper' : '✧ Run AI Extraction'}
+              </button>`
+            : ''
+        }
+        <button class="button secondary small" data-copy-bibtex="${f.id}">📋 Copy BibTeX</button>
+        <button class="button secondary small" data-send-to-notebook="${f.id}">＋ Send to Lab Notebook</button>
+        <button class="button secondary small" data-task-from-file="${f.id}">＋ Follow-up Task</button>
+        <button class="text-link" id="dismiss-summary">Close ✕</button>
+      </div>
+    </div>
+
+    ${
+      cit.title || cit.authors
+        ? `<div class="hint" style="margin-bottom:14px">
+            <strong>${esc(cit.title || f.original_name)}</strong><br/>
+            <span class="small-text">${esc(cit.authors || '')} ${cit.year ? `(${esc(cit.year)})` : ''} ${cit.journal ? `· <em>${esc(cit.journal)}</em>` : ''}</span>
+          </div>`
+        : ''
+    }
+
+    ${
+      rev
+        ? `<div class="two-col" style="margin-bottom:16px">
+            <div class="mini-tip"><strong>1. Research Objective</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.objective || '—')}</p></div>
+            <div class="mini-tip"><strong>2. Methodology & Model</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.methodology || '—')}</p></div>
+            <div class="mini-tip"><strong>3. Governing Equations & Parameters</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.governing_equations_and_params || '—')}</p></div>
+            <div class="mini-tip"><strong>4. Key Findings & Conclusions</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.key_findings || '—')}</p></div>
+          </div>
+          <div class="mini-tip" style="margin-bottom:16px"><strong>5. Limitations & Research Gaps</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.limitations_and_gaps || '—')}</p></div>
+          ${rev.truncated ? '<div class="hint" style="margin-bottom:14px">Note: Middle sections were truncated to fit model context limits.</div>' : ''}`
+        : extractable
+          ? `<div class="hint" style="margin-bottom:16px">No structured AI review cached yet. Click <strong>Run AI Extraction</strong> above to extract Objective, Methodology, Governing Equations, Findings, and BibTeX automatically.</div>`
+          : ''
+    }
+
+    <form id="file-notes-form" data-file-id="${f.id}">
+      <div class="two-col" style="margin-bottom:10px">
+        <label style="display:block">
+          <span class="small-text"><strong>Topic Tags</strong> (comma-separated)</span>
+          <input name="tags" class="field" value="${esc((f.tags || []).join(', '))}" placeholder="e.g. Methodology, Baseline, Simulation, Theory" />
+        </label>
+        <div style="display:flex;gap:10px">
+          <label style="flex:1">
+            <span class="small-text"><strong>Reading Status</strong></span>
+            <select name="reading_status" class="field">
+              ${readingStatuses.map(s => `<option ${(f.reading_status || 'To Read') === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+            </select>
+          </label>
+          <label style="flex:1">
+            <span class="small-text"><strong>Project Phase</strong></span>
+            <select name="project_phase" class="field">
+              ${phases.map(p => `<option ${(f.project_phase || 'Other') === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+      </div>
+      <label style="display:block">
+        <span class="small-text"><strong>Personal Literature Notes, Equations & Parameters</strong></span>
+        <textarea name="user_notes" class="field" rows="4" placeholder="Record key equations, boundary conditions, parameter values, or how this paper compares to your work...">${esc(f.user_notes || '')}</textarea>
+      </label>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button type="submit" class="button solid small">✓ Save Notes & Tags</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function renderComparisonPanel() {
+  if (!state.comparisonPapers || state.comparisonPapers.length < 2) return '';
+  const papers = state.comparisonPapers;
+  const rows = [
+    { label: 'Citation / Year', fn: p => `${p.citation_meta?.authors || '—'} (${p.citation_meta?.year || '—'})` },
+    { label: 'Phase & Status', fn: p => `${p.project_phase || 'Other'} · ${p.reading_status || 'To Read'}` },
+    { label: 'Objective', fn: p => p.ai_review_data?.objective || 'Not extracted yet' },
+    { label: 'Methodology', fn: p => p.ai_review_data?.methodology || 'Not extracted yet' },
+    { label: 'Equations & Parameters', fn: p => p.ai_review_data?.governing_equations_and_params || 'Not extracted yet' },
+    { label: 'Key Findings', fn: p => p.ai_review_data?.key_findings || 'Not extracted yet' },
+    { label: 'Limitations & Gaps', fn: p => p.ai_review_data?.limitations_and_gaps || 'Not extracted yet' },
+    { label: 'Your Notes', fn: p => p.user_notes || '—' }
+  ];
+
+  return `<div id="comparison-panel" class="card panel section-spacer" style="border-left:3px solid #6366f1">
+    <div class="panel-heading">
+      <span>⇄ Side-by-Side Literature Comparison (${papers.length} papers)</span>
+      <button class="text-link" id="close-comparison">Close ✕</button>
+    </div>
+    <div class="task-table-wrap">
+      <table class="task-table">
+        <thead>
+          <tr>
+            <th style="width:160px">Dimension</th>
+            ${papers.map(p => `<th style="min-width:240px">${esc(p.original_name)}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              r => `<tr>
+                <td><strong>${esc(r.label)}</strong></td>
+                ${papers.map(p => `<td style="white-space:normal;vertical-align:top;font-size:12px">${esc(r.fn(p))}</td>`).join('')}
+              </tr>`
+            )
+            .join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function filesPage() {
+  const allFiles = state.data.files;
+  const shownFiles = filteredFiles();
+  const analyzedCount = allFiles.filter(f => f.ai_review_data).length;
+  const citedCount = allFiles.filter(f => f.reading_status === 'Cited' || f.reading_status === 'Key Reference').length;
+
+  return `${pageHeading(
+    'KNOWLEDGE BASE & LITERATURE REVIEW',
+    'Research library',
+    'Organize papers, extract governing equations and methodology, compare findings, and link notes to your workflow.',
+    `<span class="meta-tag">${allFiles.length} files · ${analyzedCount} extracted · ${citedCount} key/cited</span>`
+  )}
+  <label for="file-input" id="drop-zone" class="file-drop" style="display:block">
+    <span class="upload-icon">⇧</span>
+    <h3>Drop research files here, or browse</h3>
+    <p>PDF, DOCX, XLSX, CSV, INP, DAT, LOG, STA, MSG, TXT, ZIP and more · 15 MB per file</p>
+    <span class="button secondary small">Browse files</span>
+    <input id="file-input" type="file" hidden multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.json,.inp,.dat,.log,.sta,.msg,.odb,.py,.png,.jpg,.jpeg,.zip" />
+  </label>
+
+  ${renderActiveReviewDrawer()}
+  ${renderComparisonPanel()}
+
+  <div class="card panel section-spacer">
+    <div class="filter-bar" style="margin-bottom:14px">
+      <div class="search-box">
+        <input class="field" id="lib-search" placeholder="Search title, author, tag, equation, or note..." value="${esc(state.libSearch)}" />
+      </div>
+      <select class="field" id="lib-status-filter">
+        <option value="All">All statuses</option>
+        ${readingStatuses.map(s => `<option value="${esc(s)}" ${state.libStatusFilter === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+      </select>
+      <select class="field" id="lib-phase-filter">
+        <option value="All">All phases</option>
+        ${phases.map(p => `<option value="${esc(p)}" ${state.libPhaseFilter === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="panel-heading" style="flex-wrap:wrap;gap:10px">
+      <span>Files shared by your team <span class="muted small-text" id="lib-count">(${shownFiles.length} of ${allFiles.length})</span></span>
+      <div class="inline-actions" style="flex-wrap:wrap">
+        ${
+          state.selectedFiles.length >= 2
+            ? `<button class="button solid small" id="compare-selected-btn">⇄ Compare Selected (${state.selectedFiles.length})</button>`
+            : ''
+        }
+        ${
+          state.selectedFiles.length > 0
+            ? `<button class="button ghost small" id="clear-selected-btn">Clear (${state.selectedFiles.length})</button>`
+            : ''
+        }
+        <button class="tiny-btn ${state.libView === 'list' ? 'active' : ''}" data-lib-view="list">☰ List View</button>
+        <button class="tiny-btn ${state.libView === 'matrix' ? 'active' : ''}" data-lib-view="matrix">⊞ Literature Matrix</button>
+      </div>
+    </div>
+
+    <div id="lib-files-target">
+      ${renderFileListOrMatrix(shownFiles)}
+    </div>
+  </div>
+
+  <div class="hint section-spacer">Privacy: files are isolated to your workspace in PostgreSQL. Only invited members of this workspace can access them.</div>`;
+}
+
+// =========================================================================
+
+const formatBytes = n =>
+  n < 1024 ? n + ' bytes' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+const empty = (symbol, title, help) =>
+  `<div class="empty-state"><div class="empty-symbol">${symbol}</div><strong>${esc(title)}</strong><span>${esc(help)}</span></div>`;
+
+function notesPage() {
+  const notes = state.data.notes;
+  return `${pageHeading('RESEARCH JOURNAL', 'Lab notebook', 'Document decisions, meetings, methods, breakthroughs, and next steps.')}
+ <div class="two-col"><section><div class="card panel"><div class="panel-heading">Add a research note</div><form id="note-form"><textarea name="body" class="field" rows="5" maxlength="10000" required placeholder="Today we derived the governing relationship for...\n\nNext: verify numerical response against baseline benchmark."></textarea><div style="display:flex;justify-content:flex-end;margin-top:11px"><button type="submit" class="button solid">＋ Save to notebook</button></div></form></div><div class="note-list section-spacer">${notes.length ? notes.map(n => `<div class="card note-card"><div class="note-meta"><span><strong>${esc(n.author_name || 'Researcher')}</strong> · ${timeDate(n.created_at)}</span><button class="text-link" data-delete-note="${n.id}">Delete</button></div><p>${esc(n.body)}</p></div>`).join('') : empty('≡', 'Notebook is empty', 'Create the first research note.')}</div></section><section class="card panel" style="align-self:start"><div class="panel-heading">Suggested note format</div><div class="mini-tip"><strong>Research activity</strong><br/>What calculations, modelling or writing were completed?</div><div class="mini-tip"><strong>Observations</strong><br/>What results, errors or limitations emerged?</div><div class="mini-tip"><strong>Decisions</strong><br/>Which assumptions and parameters were agreed upon?</div><div class="mini-tip"><strong>Next steps</strong><br/>What should each collaborator do next?</div></section></div>`;
+}
+
+function activityRows(rows) {
+  if (!rows.length) return empty('◷', 'No activity yet', 'Task and file changes will appear here.');
+  return rows
+    .map(
+      a =>
+        `<div class="timeline-entry"><span class="timeline-avatar">${esc(initials(a.actor_name))}</span><div><strong>${esc(a.description)}</strong><p>${esc(a.actor_name || 'Workspace')} · ${timeDate(a.created_at)}</p></div></div>`
+    )
+    .join('');
+}
+
+function activityPage() {
+  return `${pageHeading('RESEARCH HISTORY', 'Activity timeline', 'See who updated what and when, in chronological order.')}<div class="card panel">${activityRows(state.data.activities)}</div>`;
+}
+
+function teamPage() {
+  const m = state.data.members;
+  const maxSeats = state.data.maxSeats || 10;
+  const isOwner = (state.workspace?.role || state.user.role) === 'owner';
+  const wsName = state.workspace?.name || 'Research Workspace';
+
+  return `${pageHeading('COLLABORATION', 'Research team', `Manage members for ${wsName}.`)}
+ <div class="two-col">
+   <div class="card panel">
+     <div class="panel-heading">Workspace members <span class="meta-tag">${m.length} of ${maxSeats} seats</span></div>
+     ${m
+       .map(
+         u =>
+           `<div class="member-row"><div class="avatar">${esc(initials(u.name))}</div><div class="member-info"><strong>${esc(u.name)}</strong><small>${esc(u.email)}</small></div><div class="member-role">${u.role === 'owner' ? 'OWNER' : 'COLLABORATOR'}</div></div>`
+       )
+       .join('')}
+   </div>
+   <div class="card panel">
+     <div class="panel-heading">Invite a teammate</div>
+     ${
+       isOwner && m.length < maxSeats
+         ? `<p class="small-text muted">Invite a research colleague to <strong>${esc(wsName)}</strong> using their email address. A private one-time link will be generated for you to share securely.</p>
+            <form id="invite-form">
+              <input type="email" name="email" class="field" required placeholder="colleague@university.edu" />
+              <button class="button solid" style="margin-top:11px" type="submit">Generate invitation link</button>
+            </form>
+            <div id="invite-result"></div>`
+         : m.length >= maxSeats
+           ? `<div class="hint">All ${maxSeats} workspace seats are occupied.</div>`
+           : `<div class="hint">Ask the workspace owner to generate new teammate invitations.</div>`
+     }
+   </div>
+ </div>`;
+}
+
+function openTask(task = null) {
+  const dlg = $('task-dialog');
+  const f = $('task-form');
+  f.reset();
+  $('task-dialog-title').textContent = task && task.id ? 'Edit research task' : 'New research task';
+  f.elements.id.value = task?.id || '';
+  f.elements.title.value = task?.title || '';
+  f.elements.description.value = task?.description || '';
+  f.elements.phase.value = task?.phase || 'Analytical';
+  f.elements.status.value = task?.status || 'To do';
+  f.elements.priority.value = task?.priority || 'Medium';
+  f.elements.dueDate.value = task?.due_date ? String(task.due_date).slice(0, 10) : '';
+  $('task-assign').innerHTML =
+    `<option value="">Unassigned</option>` +
+    state.data.members.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
+  f.elements.assigneeId.value = task?.assignee_id || '';
+  dlg.showModal();
+}
+
+async function createTask(form) {
+  const data = Object.fromEntries(new FormData(form));
+  const id = data.id;
+  const body = {
+    title: data.title,
+    description: data.description,
+    phase: data.phase,
+    status: data.status,
+    priority: data.priority,
+    assigneeId: data.assigneeId ? Number(data.assigneeId) : null,
+    dueDate: data.dueDate || null
+  };
+  if (id) await api('/tasks/' + id, { method: 'PATCH', body });
+  else await api('/tasks', { method: 'POST', body });
+  $('task-dialog').close();
+  toast(id ? 'Task updated' : 'New research task created');
+  await reload();
+}
+
+async function handleAgent(message) {
+  if (state.busy) return;
+  state.busy = true;
+  state.pendingActions = [];
+  state.messages.push({ role: 'user', text: message });
+  goto('agent');
+  state.messages.push({ role: 'assistant', text: 'Interpreting your update…' });
+  render();
+  try {
+    const result = await api('/agent/interpret', { method: 'POST', body: { message } });
+    state.messages.pop();
+    state.messages.push({ role: 'assistant', text: result.reply || 'No response.' });
+    state.pendingActions = result.actions || [];
+  } catch (e) {
+    state.messages.pop();
+    state.messages.push({ role: 'assistant', text: 'Unable to process this command: ' + e.message });
+  } finally {
+    state.busy = false;
+    render();
+    const chat = $('chat-scroll');
+    if (chat) chat.scrollTop = chat.scrollHeight;
+  }
+}
+
+async function uploadFiles(files) {
+  const list = Array.from(files);
+  for (const file of list) {
+    if (file.size > 15 * 1024 * 1024) {
+      toast(file.name + ' is larger than 15 MB', true);
+      continue;
+    }
+    const form = new FormData();
+    form.append('file', file);
+    if (state.libPhaseFilter !== 'All') {
+      form.append('project_phase', state.libPhaseFilter);
+    }
+    try {
+      toast('Uploading ' + file.name + '…');
+      await api('/files', { method: 'POST', body: form, form: true });
+      toast('Uploaded ' + file.name);
+    } catch (e) {
+      toast('Upload failed: ' + e.message, true);
+    }
+  }
+  await reload();
+}
+
+async function runFileAnalysis(fileId, forceRefresh = false) {
+  toast(forceRefresh ? 'Re-analyzing paper…' : 'Extracting structured literature review…');
+  const r = await api('/agent/summarize-file/' + fileId, {
+    method: 'POST',
+    body: { forceRefresh }
   });
+  toast(r.cached ? 'Loaded cached literature extraction' : 'Literature review extracted & saved');
+  state.activeReviewFileId = Number(fileId);
+  await reload({ quiet: true });
+}
+
+function buildBibtexFallback(f) {
+  const cit = f.citation_meta || {};
+  if (cit.bibtex && cit.bibtex.trim()) return cit.bibtex.trim();
+  const slug = f.original_name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]/g, '');
+  return `@article{${slug || 'ref' + f.id},\n  title = {${cit.title || f.original_name}},\n  author = {${cit.authors || 'Unknown'}},\n  year = {${cit.year || new Date(f.created_at).getFullYear()}}\n}`;
+}
+
+async function boot() {
+  try {
+    const r = await api('/bootstrap');
+    if (!r.authenticated) {
+      authView();
+      return;
+    }
+    state.user = r.user;
+    state.workspace = r.workspace;
+    state.workspaces = r.workspaces || [];
+    state.csrf = r.csrf;
+    state.aiEnabled = r.aiEnabled;
+    showApp();
+    await reload();
+    setInterval(() => {
+      if (
+        state.user &&
+        !state.busy &&
+        $('task-dialog').open === false &&
+        document.visibilityState === 'visible' &&
+        !document.querySelector('#content input:focus,#content textarea:focus,#content select:focus')
+      )
+        reload({ quiet: true });
+    }, 30000);
+  } catch (e) {
+    authView();
+    toast('Unable to connect: ' + e.message, true);
+  }
+}
+
+document.addEventListener('submit', async e => {
+  const form = e.target;
+  if (
+    ![
+      'login-form',
+      'register-form',
+      'accept-invite-form',
+      'task-form',
+      'note-form',
+      'agent-form',
+      'quick-form',
+      'invite-form',
+      'file-notes-form'
+    ].includes(form.id)
+  )
+    return;
+  e.preventDefault();
+  const btn = form.querySelector('button[type=submit]');
+  if (btn) btn.disabled = true;
+  try {
+    if (form.id === 'login-form') {
+      const r = await api('/auth/login', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
+      state.user = r.user;
+      state.workspace = r.workspace;
+      state.workspaces = r.workspaces || [];
+      state.csrf = r.csrf;
+      const b = await api('/bootstrap');
+      state.aiEnabled = b.aiEnabled;
+      showApp();
+      await reload();
+    }
+    if (form.id === 'register-form') {
+      const r = await api('/auth/register', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
+      state.user = r.user;
+      state.workspace = r.workspace;
+      state.workspaces = r.workspaces || [];
+      state.csrf = r.csrf;
+      const b = await api('/bootstrap');
+      state.aiEnabled = b.aiEnabled;
+      toast('Workspace created!');
+      showApp();
+      await reload();
+    }
+    if (form.id === 'accept-invite-form') {
+      const invite = new URLSearchParams(location.search).get('token');
+      const data = Object.fromEntries(new FormData(form));
+      const r = await api('/auth/accept', { method: 'POST', body: { ...data, token: invite } });
+      state.user = r.user;
+      state.workspace = r.workspace;
+      state.workspaces = r.workspaces || [];
+      state.csrf = r.csrf;
+      history.replaceState({}, '', '/');
+      const b = await api('/bootstrap');
+      state.aiEnabled = b.aiEnabled;
+      toast('Joined workspace!');
+      showApp();
+      await reload();
+    }
+    if (form.id === 'task-form') await createTask(form);
+    if (form.id === 'note-form') {
+      const body = form.elements.body.value;
+      await api('/notes', { method: 'POST', body: { body } });
+      toast('Research note saved');
+      await reload();
+    }
+    if (form.id === 'file-notes-form') {
+      const fileId = form.dataset.fileId;
+      const tags = form.elements.tags.value
+        .split(',')
+        .map(t => t.trim())
+        .filter(Boolean);
+      const reading_status = form.elements.reading_status.value;
+      const project_phase = form.elements.project_phase.value;
+      const user_notes = form.elements.user_notes.value;
+      await api(`/files/${fileId}/metadata`, {
+        method: 'PATCH',
+        body: { tags, reading_status, project_phase, user_notes }
+      });
+      toast('Literature notes & tags saved');
+      await reload({ quiet: true });
+    }
+    if (form.id === 'agent-form' || form.id === 'quick-form') {
+      const msg = form.elements.message.value.trim();
+      if (msg) await handleAgent(msg);
+    }
+    if (form.id === 'invite-form') {
+      const email = form.elements.email.value;
+      const r = await api('/auth/invite', { method: 'POST', body: { email } });
+      const url = new URL(r.invitePath, location.origin).href;
+      const el = $('invite-result');
+      if (el)
+        el.innerHTML = `<div class="hint" style="margin-top:13px">Invitation for <strong>${esc(email)}</strong> · expires in ${esc(r.expiresIn)}.<div class="code-box">${esc(url)}</div><button class="button secondary small" id="copy-invite" data-copy="${esc(url)}">Copy invitation link</button><p style="font-size:10px">Anyone with this link can claim the invitation for the specified email. Share it privately.</p></div>`;
+      toast('Invitation link generated');
+    }
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+document.addEventListener('click', async e => {
+  const el = e.target.closest('button');
+  if (!el) return;
+  if (el.hasAttribute('data-auth-mode')) {
+    state.authMode = el.dataset.authMode;
+    authView();
+    return;
+  }
+  if (el.hasAttribute('data-page')) {
+    goto(el.dataset.page);
+    return;
+  }
+  if (el.hasAttribute('data-go')) {
+    goto(el.dataset.go);
+    return;
+  }
+  if (el.hasAttribute('data-new-task')) {
+    openTask();
+    return;
+  }
+  if (el.hasAttribute('data-edit')) {
+    openTask(state.data.tasks.find(t => t.id === Number(el.dataset.edit)));
+    return;
+  }
+  if (el.hasAttribute('data-close-dialog')) {
+    $('task-dialog').close();
+    return;
+  }
+  if (el.hasAttribute('data-prompt')) {
+    await handleAgent(el.dataset.prompt);
+    return;
+  }
+  if (el.hasAttribute('data-copy')) {
+    try {
+      await navigator.clipboard.writeText(el.dataset.copy);
+      toast('Invitation link copied');
+    } catch {
+      toast('Copy failed; select the link above', true);
+    }
+    return;
+  }
+  if (el.hasAttribute('data-lib-view')) {
+    state.libView = el.dataset.libView;
+    render();
+    return;
+  }
+
+  try {
+    if (el.id === 'logout') {
+      await api('/auth/logout', { method: 'POST' });
+      state.user = null;
+      state.workspace = null;
+      state.workspaces = [];
+      state.csrf = null;
+      state.messages = [];
+      state.pendingActions = [];
+      authView();
+      return;
+    }
+    if (el.hasAttribute('data-complete')) {
+      await api('/tasks/' + el.dataset.complete, { method: 'PATCH', body: { status: 'Done' } });
+      toast('Task marked completed');
+      await reload();
+      return;
+    }
+    if (el.hasAttribute('data-delete-task')) {
+      if (!confirm('Permanently delete this task?')) return;
+      await api('/tasks/' + el.dataset.deleteTask, { method: 'DELETE' });
+      toast('Task deleted');
+      await reload();
+      return;
+    }
+    if (el.hasAttribute('data-delete-note')) {
+      if (!confirm('Delete this research note?')) return;
+      await api('/notes/' + el.dataset.deleteNote, { method: 'DELETE' });
+      toast('Note deleted');
+      await reload();
+      return;
+    }
+    if (el.hasAttribute('data-delete-file')) {
+      if (!confirm('Permanently delete this uploaded file?')) return;
+      await api('/files/' + el.dataset.deleteFile, { method: 'DELETE' });
+      toast('File deleted');
+      await reload();
+      return;
+    }
+    if (el.hasAttribute('data-download')) {
+      window.location.href = '/api/files/' + encodeURIComponent(el.dataset.download) + '/download';
+      return;
+    }
+    if (el.hasAttribute('data-open-review')) {
+      const fileId = Number(el.dataset.openReview);
+      const file = state.data.files.find(x => x.id === fileId);
+      state.activeReviewFileId = fileId;
+      render();
+      const slot = $('file-summary');
+      if (slot) slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (file && !file.ai_review_data && isTextExtractable(file.original_name) && state.aiEnabled) {
+        await runFileAnalysis(fileId, false);
+      }
+      return;
+    }
+    if (el.hasAttribute('data-summarize')) {
+      el.disabled = true;
+      const force = el.dataset.force === '1';
+      await runFileAnalysis(el.dataset.summarize, force);
+      return;
+    }
+    if (el.hasAttribute('data-copy-bibtex')) {
+      const f = state.data.files.find(x => x.id === Number(el.dataset.copyBibtex));
+      if (f) {
+        const bib = buildBibtexFallback(f);
+        await navigator.clipboard.writeText(bib);
+        toast('BibTeX citation copied to clipboard');
+      }
+      return;
+    }
+    if (el.hasAttribute('data-send-to-notebook')) {
+      const f = state.data.files.find(x => x.id === Number(el.dataset.sendToNotebook));
+      if (f) {
+        const rev = f.ai_review_data;
+        const body = rev
+          ? `Literature Review — ${f.original_name}\n\nObjective: ${rev.objective || '—'}\n\nMethodology: ${rev.methodology || '—'}\n\nEquations & Parameters: ${rev.governing_equations_and_params || '—'}\n\nKey Findings: ${rev.key_findings || '—'}${f.user_notes ? `\n\nNotes: ${f.user_notes}` : ''}`
+          : `Literature Notes — ${f.original_name}\n\n${f.user_notes || 'Added from Research Library.'}`;
+        await api('/notes', { method: 'POST', body: { body: body.slice(0, 10000) } });
+        toast('Sent to Lab Notebook');
+        await reload({ quiet: true });
+      }
+      return;
+    }
+    if (el.hasAttribute('data-task-from-file')) {
+      const f = state.data.files.find(x => x.id === Number(el.dataset.taskFromFile));
+      if (f) {
+        openTask({
+          title: `Review & verify equations from ${f.original_name}`,
+          description: f.ai_review_data?.limitations_and_gaps || '',
+          phase: f.project_phase || 'Analytical',
+          status: 'To do',
+          priority: 'Medium'
+        });
+      }
+      return;
+    }
+    if (el.id === 'compare-selected-btn') {
+      if (state.selectedFiles.length < 2) return;
+      el.disabled = true;
+      const res = await api('/files/compare', { method: 'POST', body: { fileIds: state.selectedFiles } });
+      state.comparisonPapers = res.papers || [];
+      render();
+      const panel = $('comparison-panel');
+      if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    if (el.id === 'clear-selected-btn') {
+      state.selectedFiles = [];
+      state.comparisonPapers = null;
+      render();
+      return;
+    }
+    if (el.id === 'close-comparison') {
+      state.comparisonPapers = null;
+      render();
+      return;
+    }
+    if (el.id === 'dismiss-summary') {
+      state.activeReviewFileId = null;
+      render();
+      return;
+    }
+    if (el.id === 'discard-actions') {
+      state.pendingActions = [];
+      render();
+      return;
+    }
+    if (el.id === 'confirm-actions') {
+      if (state.busy) return;
+      state.busy = true;
+      await api('/agent/apply', { method: 'POST', body: { actions: state.pendingActions } });
+      state.messages.push({ role: 'assistant', text: 'Confirmed. Your approved changes were saved to the shared workspace.' });
+      state.pendingActions = [];
+      state.busy = false;
+      toast('Research workspace updated');
+      await reload();
+      return;
+    }
+    if (el.id === 'save-task') {
+      const form = $('task-form');
+      if (!form.reportValidity()) return;
+      el.disabled = true;
+      try {
+        await createTask(form);
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        el.disabled = false;
+      }
+      return;
+    }
+  } catch (error) {
+    state.busy = false;
+    toast(error.message, true);
+    if (el.hasAttribute('data-summarize') || el.id === 'compare-selected-btn') el.disabled = false;
+  }
+});
+
+document.addEventListener('input', e => {
+  if (e.target.id === 'task-search') {
+    state.search = e.target.value;
+    $('task-table-target').innerHTML = table(filteredTasks());
+    $('task-count').textContent = '(' + filteredTasks().length + ' of ' + state.data.tasks.length + ')';
+  }
+  if (e.target.id === 'lib-search') {
+    state.libSearch = e.target.value;
+    const shown = filteredFiles();
+    $('lib-files-target').innerHTML = renderFileListOrMatrix(shown);
+    $('lib-count').textContent = '(' + shown.length + ' of ' + state.data.files.length + ')';
+  }
+});
+
+document.addEventListener('change', async e => {
+  const t = e.target;
+  if (t.id === 'workspace-switcher') {
+    if (t.value === '__new__') {
+      const name = prompt('Enter a name for your new research workspace:');
+      if (!name || !name.trim()) {
+        renderWorkspaceHeader();
+        return;
+      }
+      try {
+        const res = await api('/workspaces', { method: 'POST', body: { name: name.trim() } });
+        state.workspace = res.workspace;
+        state.workspaces = res.workspaces;
+        state.activeReviewFileId = null;
+        state.selectedFiles = [];
+        state.comparisonPapers = null;
+        toast(`Switched to "${res.workspace.name}"`);
+        showApp();
+        await reload();
+      } catch (err) {
+        toast(err.message, true);
+        renderWorkspaceHeader();
+      }
+      return;
+    }
+    try {
+      const res = await api('/workspaces/switch', { method: 'POST', body: { workspaceId: Number(t.value) } });
+      state.workspace = res.workspace;
+      state.workspaces = res.workspaces;
+      state.activeReviewFileId = null;
+      state.selectedFiles = [];
+      state.comparisonPapers = null;
+      toast(`Switched to "${res.workspace.name}"`);
+      showApp();
+      await reload();
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+  if (t.id === 'status-filter') {
+    state.filter = t.value;
+    render();
+    return;
+  }
+  if (t.id === 'phase-filter') {
+    state.phaseFilter = t.value;
+    render();
+    return;
+  }
+  if (t.id === 'lib-status-filter') {
+    state.libStatusFilter = t.value;
+    render();
+    return;
+  }
+  if (t.id === 'lib-phase-filter') {
+    state.libPhaseFilter = t.value;
+    render();
+    return;
+  }
+  if (t.id === 'file-input' && t.files?.length) {
+    uploadFiles(t.files);
+    return;
+  }
+  if (t.id === 'select-all-files') {
+    const shownIds = filteredFiles().map(f => f.id);
+    state.selectedFiles = t.checked ? shownIds : [];
+    render();
+    return;
+  }
+  if (t.hasAttribute('data-select-file')) {
+    const id = Number(t.dataset.selectFile);
+    if (t.checked) {
+      if (!state.selectedFiles.includes(id)) state.selectedFiles.push(id);
+    } else {
+      state.selectedFiles = state.selectedFiles.filter(x => x !== id);
+    }
+    render();
+    return;
+  }
+  if (t.hasAttribute('data-file-status')) {
+    const id = t.dataset.fileStatus;
+    try {
+      await api(`/files/${id}/metadata`, { method: 'PATCH', body: { reading_status: t.value } });
+      toast(`Status updated to ${t.value}`);
+      await reload({ quiet: true });
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+  if (t.hasAttribute('data-file-phase')) {
+    const id = t.dataset.filePhase;
+    try {
+      await api(`/files/${id}/metadata`, { method: 'PATCH', body: { project_phase: t.value } });
+      toast(`Assigned to ${t.value} phase`);
+      await reload({ quiet: true });
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+});
+
+const drop = $('workspace');
+drop.addEventListener('dragover', e => {
+  const target = e.target.closest('#drop-zone');
+  if (target) {
+    e.preventDefault();
+    target.classList.add('dragover');
+  }
+});
+drop.addEventListener('dragleave', e => {
+  const target = e.target.closest('#drop-zone');
+  if (target) target.classList.remove('dragover');
+});
+drop.addEventListener('drop', e => {
+  const target = e.target.closest('#drop-zone');
+  if (target) {
+    e.preventDefault();
+    target.classList.remove('dragover');
+    if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+  }
+});
+
+boot();
