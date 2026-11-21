@@ -50,7 +50,6 @@ const readingStatuses = ['To Read', 'Skimming', 'Deep Read', 'Cited', 'Key Refer
 
 const toast = (message, error = false) => {
   const e = $('toast');
-  if (!e) return;
   e.textContent = message;
   e.className = 'toast show' + (error ? ' error' : '');
   clearTimeout(toast.t);
@@ -90,31 +89,18 @@ async function reload({ quiet = false } = {}) {
     const data = await api('/dashboard');
     state.data = data;
     if (data.workspace) state.workspace = data.workspace;
-
     const validIds = new Set(data.files.map(f => f.id));
     state.selectedFiles = state.selectedFiles.filter(id => validIds.has(id));
     if (state.activeReviewFileId && !validIds.has(state.activeReviewFileId)) {
       state.activeReviewFileId = null;
     }
-
-    // Keep comparison papers synced with latest file metadata/deletions
-    if (Array.isArray(state.comparisonPapers)) {
-      const fileMap = new Map(data.files.map(f => [f.id, f]));
-      const refreshed = state.comparisonPapers
-        .map(p => fileMap.get(p.id))
-        .filter(Boolean);
-      state.comparisonPapers = refreshed.length >= 2 ? refreshed : null;
-    }
-
     renderWorkspaceHeader();
     renderSidebar();
     render();
-    const syncEl = $('sync-status');
-    if (syncEl) syncEl.innerHTML = '<span class="online-dot"></span> Synced';
+    $('sync-status').innerHTML = '<span class="online-dot"></span> Synced';
   } catch (e) {
     if (!quiet) toast(e.message, true);
-    const syncEl = $('sync-status');
-    if (syncEl) syncEl.textContent = 'Sync unavailable';
+    $('sync-status').textContent = 'Sync unavailable';
   }
 }
 
@@ -281,22 +267,10 @@ function overviewPage() {
   const current = tasks.filter(t => t.status !== 'Done');
   const f = state.data.files;
   const wsName = state.workspace?.name || 'Shared research workspace';
-  const todayLabel = new Date().toLocaleDateString(undefined, {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric'
-  }).toUpperCase();
-
-  return `${pageHeading(
-    wsName.toUpperCase() + ' · ' + todayLabel,
-    'Good to see you, ' + state.user.name.split(' ')[0] + '.',
-    'Here is the current state of your shared research workspace.',
-    `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`
-  )}
+  return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
  <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
  <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Completion is measured by completed tasks, not experimental validity or manuscript readiness.</p></section>
- <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit" ${state.busy ? 'disabled' : ''}>Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Validate numerical simulation results">＋ Add validation task</button></div></section></div>
+ <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Validate numerical simulation results">＋ Add validation task</button></div></section></div>
  <div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
 }
 
@@ -328,7 +302,7 @@ function agentPage() {
   const proposals = state.pendingActions.length
     ? `<div class="action-review"><strong>PROPOSED CHANGES · REVIEW BEFORE APPLYING</strong><ul>${state.pendingActions.map(a => `<li>${esc(describeAction(a))}</li>`).join('')}</ul><div class="action-buttons"><button class="button teal small" id="confirm-actions">✓ Apply ${state.pendingActions.length} update(s)</button><button class="button secondary small" id="discard-actions">Discard</button></div></div>`
     : '';
-  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000" ${state.busy ? 'disabled' : ''}></textarea><button class="button solid" type="submit" ${state.busy ? 'disabled' : ''}>${state.busy ? 'Thinking…' : 'Send ↗'}</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed literature review matrix”', '“Started numerical model validation”', '“Add task: Compare baseline boundary conditions”', '“Note: Agreed on mesh convergence tolerance”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal" ${state.busy ? 'disabled' : ''}>${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
+  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000"></textarea><button class="button solid" type="submit">Send ↗</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed literature review matrix”', '“Started numerical model validation”', '“Add task: Compare baseline boundary conditions”', '“Note: Agreed on mesh convergence tolerance”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal">${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
 }
 
 function describeAction(a) {
@@ -399,7 +373,7 @@ function renderFileListOrMatrix(files) {
     return `<div class="task-table-wrap"><table class="task-table">
       <thead>
         <tr>
-          <th style="width:28px"><input type="checkbox" id="select-all-files" ${files.length > 0 && files.every(f => state.selectedFiles.includes(f.id)) ? 'checked' : ''} /></th>
+          <th style="width:28px"><input type="checkbox" id="select-all-files" ${files.every(f => state.selectedFiles.includes(f.id)) ? 'checked' : ''} /></th>
           <th>Paper / File</th>
           <th>Phase & Status</th>
           <th>Objective & Methodology</th>
@@ -883,21 +857,14 @@ async function boot() {
     showApp();
     await reload();
     setInterval(() => {
-      const dlg = $('task-dialog');
-      const inviteBox = $('invite-result');
-      const hasFocusedField = Boolean(
-        document.querySelector('#content input:focus,#content textarea:focus,#content select:focus')
-      );
       if (
         state.user &&
         !state.busy &&
-        (!dlg || !dlg.open) &&
+        $('task-dialog').open === false &&
         document.visibilityState === 'visible' &&
-        !hasFocusedField &&
-        (!inviteBox || !inviteBox.innerHTML.trim())
-      ) {
+        !document.querySelector('#content input:focus,#content textarea:focus,#content select:focus')
+      )
         reload({ quiet: true });
-      }
     }, 30000);
   } catch (e) {
     authView();
@@ -923,9 +890,7 @@ document.addEventListener('submit', async e => {
     return;
   e.preventDefault();
   const btn = form.querySelector('button[type=submit]');
-  const saveTaskBtn = form.id === 'task-form' ? $('save-task') : null;
   if (btn) btn.disabled = true;
-  if (saveTaskBtn) saveTaskBtn.disabled = true;
   try {
     if (form.id === 'login-form') {
       const r = await api('/auth/login', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
@@ -1005,7 +970,6 @@ document.addEventListener('submit', async e => {
     toast(error.message, true);
   } finally {
     if (btn) btn.disabled = false;
-    if (saveTaskBtn) saveTaskBtn.disabled = false;
   }
 });
 
@@ -1121,12 +1085,8 @@ document.addEventListener('click', async e => {
       const f = state.data.files.find(x => x.id === Number(el.dataset.copyBibtex));
       if (f) {
         const bib = buildBibtexFallback(f);
-        try {
-          await navigator.clipboard.writeText(bib);
-          toast('BibTeX citation copied to clipboard');
-        } catch {
-          toast('Clipboard blocked; copy BibTeX manually from review panel', true);
-        }
+        await navigator.clipboard.writeText(bib);
+        toast('BibTeX citation copied to clipboard');
       }
       return;
     }
@@ -1198,7 +1158,7 @@ document.addEventListener('click', async e => {
       await reload();
       return;
     }
-    if (el.id === 'save-task' && el.type !== 'submit') {
+    if (el.id === 'save-task') {
       const form = $('task-form');
       if (!form.reportValidity()) return;
       el.disabled = true;
@@ -1293,9 +1253,7 @@ document.addEventListener('change', async e => {
     return;
   }
   if (t.id === 'file-input' && t.files?.length) {
-    const picked = Array.from(t.files);
-    t.value = '';
-    await uploadFiles(picked);
+    uploadFiles(t.files);
     return;
   }
   if (t.id === 'select-all-files') {
@@ -1315,60 +1273,48 @@ document.addEventListener('change', async e => {
     return;
   }
   if (t.hasAttribute('data-file-status')) {
-    const id = Number(t.dataset.fileStatus);
-    const file = state.data.files.find(f => f.id === id);
-    const prev = file?.reading_status || 'To Read';
+    const id = t.dataset.fileStatus;
     try {
       await api(`/files/${id}/metadata`, { method: 'PATCH', body: { reading_status: t.value } });
       toast(`Status updated to ${t.value}`);
       await reload({ quiet: true });
     } catch (err) {
-      t.value = prev;
       toast(err.message, true);
     }
     return;
   }
   if (t.hasAttribute('data-file-phase')) {
-    const id = Number(t.dataset.filePhase);
-    const file = state.data.files.find(f => f.id === id);
-    const prev = file?.project_phase || 'Other';
+    const id = t.dataset.filePhase;
     try {
       await api(`/files/${id}/metadata`, { method: 'PATCH', body: { project_phase: t.value } });
       toast(`Assigned to ${t.value} phase`);
       await reload({ quiet: true });
     } catch (err) {
-      t.value = prev;
       toast(err.message, true);
     }
     return;
   }
 });
 
-// Prevent browser from opening dropped files if user misses #drop-zone
-window.addEventListener('dragover', e => e.preventDefault());
-window.addEventListener('drop', e => e.preventDefault());
-
 const drop = $('workspace');
-if (drop) {
-  drop.addEventListener('dragover', e => {
-    const target = e.target.closest('#drop-zone');
-    if (target) {
-      e.preventDefault();
-      target.classList.add('dragover');
-    }
-  });
-  drop.addEventListener('dragleave', e => {
-    const target = e.target.closest('#drop-zone');
-    if (target) target.classList.remove('dragover');
-  });
-  drop.addEventListener('drop', e => {
-    const target = e.target.closest('#drop-zone');
-    if (target) {
-      e.preventDefault();
-      target.classList.remove('dragover');
-      if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
-    }
-  });
-}
+drop.addEventListener('dragover', e => {
+  const target = e.target.closest('#drop-zone');
+  if (target) {
+    e.preventDefault();
+    target.classList.add('dragover');
+  }
+});
+drop.addEventListener('dragleave', e => {
+  const target = e.target.closest('#drop-zone');
+  if (target) target.classList.remove('dragover');
+});
+drop.addEventListener('drop', e => {
+  const target = e.target.closest('#drop-zone');
+  if (target) {
+    e.preventDefault();
+    target.classList.remove('dragover');
+    if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+  }
+});
 
 boot();
