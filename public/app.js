@@ -1,8 +1,11 @@
 const state = {
   user: null,
+  workspace: null,
+  workspaces: [],
   csrf: null,
   aiEnabled: false,
-  data: { tasks: [], notes: [], files: [], activities: [], members: [] },
+  authMode: 'login', // 'login' | 'register'
+  data: { tasks: [], notes: [], files: [], activities: [], members: [], maxSeats: 10 },
   page: 'overview',
   filter: 'All',
   phaseFilter: 'All',
@@ -11,7 +14,7 @@ const state = {
   libSearch: '',
   libStatusFilter: 'All',
   libPhaseFilter: 'All',
-  libView: 'list', // 'list' | 'matrix'
+  libView: 'list',
   selectedFiles: [],
   activeReviewFileId: null,
   comparisonPapers: null,
@@ -85,12 +88,13 @@ async function reload({ quiet = false } = {}) {
   try {
     const data = await api('/dashboard');
     state.data = data;
-    // Prune deleted files from selection
+    if (data.workspace) state.workspace = data.workspace;
     const validIds = new Set(data.files.map(f => f.id));
     state.selectedFiles = state.selectedFiles.filter(id => validIds.has(id));
     if (state.activeReviewFileId && !validIds.has(state.activeReviewFileId)) {
       state.activeReviewFileId = null;
     }
+    renderWorkspaceHeader();
     renderSidebar();
     render();
     $('sync-status').innerHTML = '<span class="online-dot"></span> Synced';
@@ -106,22 +110,81 @@ function authView() {
   const params = new URLSearchParams(window.location.search);
   const invite = params.get('token');
   const el = $('auth-form-container');
-  el.innerHTML = invite
-    ? `
- <div class="eyebrow">YOU'RE INVITED</div><h2>Join your research workspace</h2><p>Your collaborator has invited you to work together. Create your account to join the project.</p>
- <form id="register-form"><label>Your name<input name="name" class="field" placeholder="Full name" required maxlength="90" /></label><label>Create password<input name="password" class="field" type="password" minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" required /></label><button class="button solid" type="submit">Accept invitation →</button></form><div class="mini-help">Invitation links expire after seven days and can only be used once.</div>`
-    : `
- <div class="eyebrow">SECURE RESEARCH COLLABORATION</div><h2>Welcome back.</h2><p>Sign in to continue where you and your research collaborator left off.</p>
- <form id="login-form"><label>Email address<input name="email" type="email" class="field" autocomplete="username" placeholder="researcher@institution.edu" required /></label><label>Password<input name="password" type="password" class="field" autocomplete="current-password" placeholder="Enter your password" required /></label><button class="button solid" type="submit">Sign in to workspace →</button></form><div class="mini-help">Access is limited to the workspace owner and one invited collaborator. Contact the owner if you need an invitation.</div>`;
+
+  if (invite) {
+    el.innerHTML = `
+      <div class="eyebrow">YOU'RE INVITED</div>
+      <h2>Join your research workspace</h2>
+      <p>Your teammate has invited you to collaborate. Create your account (or sign in with your invited email) to join.</p>
+      <form id="accept-invite-form">
+        <label>Your full name<input name="name" class="field" placeholder="Full name" required maxlength="90" /></label>
+        <label>Create password<input name="password" class="field" type="password" minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" required /></label>
+        <button class="button solid" type="submit">Accept invitation →</button>
+      </form>
+      <div class="mini-help">Invitation links expire after seven days and can only be used once.</div>`;
+    return;
+  }
+
+  if (state.authMode === 'register') {
+    el.innerHTML = `
+      <div class="eyebrow">OPEN RESEARCH OPERATING SYSTEM</div>
+      <h2>Create your workspace.</h2>
+      <p>Set up a private workspace for your lab, thesis, or research team in seconds.</p>
+      <form id="register-form">
+        <label>Your full name<input name="name" class="field" placeholder="Dr. Jane Doe" required maxlength="90" /></label>
+        <label>Workspace / lab name<input name="workspaceName" class="field" placeholder="e.g. Structural Dynamics Lab" required maxlength="100" /></label>
+        <label>Email address<input name="email" type="email" class="field" autocomplete="username" placeholder="researcher@institution.edu" required /></label>
+        <label>Password<input name="password" type="password" class="field" minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" required /></label>
+        <button class="button solid" type="submit">Create workspace →</button>
+      </form>
+      <div class="mini-help" style="margin-top:14px">
+        Already have an account? <button type="button" class="text-link" data-auth-mode="login">Sign in here →</button>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="eyebrow">RESEARCH COLLABORATION PLATFORM</div>
+    <h2>Welcome back.</h2>
+    <p>Sign in to access your research workspaces, literature reviews, and team tasks.</p>
+    <form id="login-form">
+      <label>Email address<input name="email" type="email" class="field" autocomplete="username" placeholder="researcher@institution.edu" required /></label>
+      <label>Password<input name="password" type="password" class="field" autocomplete="current-password" placeholder="Enter your password" required /></label>
+      <button class="button solid" type="submit">Sign in to workspace →</button>
+    </form>
+    <div class="mini-help" style="margin-top:14px">
+      New to ResearchFlow? <button type="button" class="text-link" data-auth-mode="register">Create a free workspace →</button>
+    </div>`;
+}
+
+function renderWorkspaceHeader() {
+  const ws = state.workspace || { name: 'Research Workspace', role: 'owner' };
+  const pill = document.querySelector('.workspace-pill');
+  if (!pill) return;
+  pill.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;width:100%">
+      <span class="workspace-badge">${esc(initials(ws.name).slice(0, 1))}</span>
+      <div style="flex:1;min-width:0">
+        <select id="workspace-switcher" aria-label="Switch workspace" style="width:100%;background:transparent;border:none;font-weight:600;font-size:13px;color:inherit;cursor:pointer;padding:0">
+          ${state.workspaces
+            .map(w => `<option value="${w.id}" ${w.id === ws.id ? 'selected' : ''}>${esc(w.name)}</option>`)
+            .join('')}
+          <option value="__new__">＋ Create new workspace…</option>
+        </select>
+        <small style="display:block;opacity:0.75;font-size:11px">${ws.role === 'owner' ? 'Workspace owner' : 'Shared workspace'}</small>
+      </div>
+    </div>`;
 }
 
 function showApp() {
   $('auth').classList.add('hidden');
   $('workspace').classList.remove('hidden');
+  const activeRole = state.workspace?.role || state.user.role || 'owner';
   $('my-name').textContent = state.user.name;
-  $('my-role').textContent = state.user.role === 'owner' ? 'Workspace owner' : 'Research collaborator';
+  $('my-role').textContent = activeRole === 'owner' ? 'Workspace owner' : 'Research collaborator';
   $('my-avatar').textContent = initials(state.user.name);
   $('top-avatar').textContent = initials(state.user.name);
+  renderWorkspaceHeader();
   renderSidebar();
   render();
 }
@@ -203,10 +266,11 @@ function overviewPage() {
     percent = tasks.length ? Math.round((100 * done) / tasks.length) : 0;
   const current = tasks.filter(t => t.status !== 'Done');
   const f = state.data.files;
-  return `${pageHeading('RESEARCH HUB · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research project.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
+  const wsName = state.workspace?.name || 'Shared research workspace';
+  return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
  <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
  <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Completion is measured by completed tasks, not experimental validity or manuscript readiness.</p></section>
- <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed half-sine pulse derivation" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Validate equivalent stress in Abaqus">＋ Add validation task</button></div></section></div>
+ <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Validate numerical simulation results">＋ Add validation task</button></div></section></div>
  <div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
 }
 
@@ -223,7 +287,7 @@ function filteredTasks() {
 
 function tasksPage() {
   const total = state.data.tasks.length;
-  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Plan experiments, assign ownership, and track every milestone.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks or experiments..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${table(filteredTasks())}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to either researcher, set a due date, or change its status. Changes are saved in the shared database and recorded in the activity timeline.</div>`;
+  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Plan experiments, assign ownership, and track every milestone.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks or experiments..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${table(filteredTasks())}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
 }
 
 function agentPage() {
@@ -238,7 +302,7 @@ function agentPage() {
   const proposals = state.pendingActions.length
     ? `<div class="action-review"><strong>PROPOSED CHANGES · REVIEW BEFORE APPLYING</strong><ul>${state.pendingActions.map(a => `<li>${esc(describeAction(a))}</li>`).join('')}</ul><div class="action-buttons"><button class="button teal small" id="confirm-actions">✓ Apply ${state.pendingActions.length} update(s)</button><button class="button secondary small" id="discard-actions">Discard</button></div></div>`
     : '';
-  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000"></textarea><button class="button solid" type="submit">Send ↗</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed equivalent stress derivation”', '“Started Abaqus model validation”', '“Add task: Compare pulse shape factors”', '“Note: Discussed Boussinesq stress transfer assumptions”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal">${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
+  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000"></textarea><button class="button solid" type="submit">Send ↗</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed literature review matrix”', '“Started numerical model validation”', '“Add task: Compare baseline boundary conditions”', '“Note: Agreed on mesh convergence tolerance”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal">${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
 }
 
 function describeAction(a) {
@@ -252,7 +316,7 @@ function describeAction(a) {
 }
 
 // =========================================================================
-// UPGRADED RESEARCH LIBRARY & LITERATURE REVIEW ENGINE
+// LITERATURE REVIEW & RESEARCH LIBRARY
 // =========================================================================
 
 function filteredFiles() {
@@ -268,7 +332,7 @@ function filteredFiles() {
     arr = arr.filter(f => {
       const rev = f.ai_review_data || {};
       const cit = f.citation_meta || {};
-      const haystack = [
+      return [
         f.original_name,
         f.uploader_name,
         f.reading_status,
@@ -283,8 +347,8 @@ function filteredFiles() {
         rev.key_findings
       ]
         .join(' ')
-        .toLowerCase();
-      return haystack.includes(q);
+        .toLowerCase()
+        .includes(q);
     });
   }
   return arr;
@@ -301,11 +365,10 @@ function renderFileListOrMatrix(files) {
       state.data.files.length ? 'No matching papers' : 'No research files yet',
       state.data.files.length
         ? 'Try clearing your search or status/phase filters.'
-        : 'Upload your first research document and it will appear here for both collaborators.'
+        : 'Upload your first research document and it will appear here for your team.'
     );
   }
 
-  // LITERATURE MATRIX VIEW
   if (state.libView === 'matrix') {
     return `<div class="task-table-wrap"><table class="task-table">
       <thead>
@@ -375,7 +438,6 @@ function renderFileListOrMatrix(files) {
     </table></div>`;
   }
 
-  // ENHANCED LIST VIEW
   return `<div class="file-list">${files
     .map(f => {
       const hasReview = Boolean(f.ai_review_data);
@@ -481,7 +543,7 @@ function renderActiveReviewDrawer() {
       <div class="two-col" style="margin-bottom:10px">
         <label style="display:block">
           <span class="small-text"><strong>Topic Tags</strong> (comma-separated)</span>
-          <input name="tags" class="field" value="${esc((f.tags || []).join(', '))}" placeholder="e.g. Critical-Speed, Stone-Columns, Analytical, FEM" />
+          <input name="tags" class="field" value="${esc((f.tags || []).join(', '))}" placeholder="e.g. Methodology, Baseline, Simulation, Theory" />
         </label>
         <div style="display:flex;gap:10px">
           <label style="flex:1">
@@ -499,8 +561,8 @@ function renderActiveReviewDrawer() {
         </div>
       </div>
       <label style="display:block">
-        <span class="small-text"><strong>Personal Literature Notes, Equations & Soil Parameters</strong></span>
-        <textarea name="user_notes" class="field" rows="4" placeholder="Record key equations, soil stiffness/damping values, boundary conditions, or how this paper compares to your derivation...">${esc(f.user_notes || '')}</textarea>
+        <span class="small-text"><strong>Personal Literature Notes, Equations & Parameters</strong></span>
+        <textarea name="user_notes" class="field" rows="4" placeholder="Record key equations, boundary conditions, parameter values, or how this paper compares to your work...">${esc(f.user_notes || '')}</textarea>
       </label>
       <div style="display:flex;justify-content:flex-end;margin-top:10px">
         <button type="submit" class="button solid small">✓ Save Notes & Tags</button>
@@ -612,7 +674,7 @@ function filesPage() {
     </div>
   </div>
 
-  <div class="hint section-spacer">Privacy: files are stored in the project's PostgreSQL database. Only signed-in workspace members can download them. Structured literature extractions are cached in your database so you only pay once per document.</div>`;
+  <div class="hint section-spacer">Privacy: files are isolated to your workspace in PostgreSQL. Only invited members of this workspace can access them.</div>`;
 }
 
 // =========================================================================
@@ -625,7 +687,7 @@ const empty = (symbol, title, help) =>
 function notesPage() {
   const notes = state.data.notes;
   return `${pageHeading('RESEARCH JOURNAL', 'Lab notebook', 'Document decisions, meetings, methods, breakthroughs, and next steps.')}
- <div class="two-col"><section><div class="card panel"><div class="panel-heading">Add a research note</div><form id="note-form"><textarea name="body" class="field" rows="5" maxlength="10000" required placeholder="Today we derived the equivalent stress relationship for...\n\nNext: check the stress distribution factor and verify numerical response."></textarea><div style="display:flex;justify-content:flex-end;margin-top:11px"><button type="submit" class="button solid">＋ Save to notebook</button></div></form></div><div class="note-list section-spacer">${notes.length ? notes.map(n => `<div class="card note-card"><div class="note-meta"><span><strong>${esc(n.author_name || 'Researcher')}</strong> · ${timeDate(n.created_at)}</span><button class="text-link" data-delete-note="${n.id}">Delete</button></div><p>${esc(n.body)}</p></div>`).join('') : empty('≡', 'Notebook is empty', 'Create the first research note.')}</div></section><section class="card panel" style="align-self:start"><div class="panel-heading">Suggested note format</div><div class="mini-tip"><strong>Research activity</strong><br/>What calculations, modelling or writing were completed?</div><div class="mini-tip"><strong>Observations</strong><br/>What results, errors or limitations emerged?</div><div class="mini-tip"><strong>Decisions</strong><br/>Which assumptions and parameters were agreed upon?</div><div class="mini-tip"><strong>Next steps</strong><br/>What should each collaborator do next?</div></section></div>`;
+ <div class="two-col"><section><div class="card panel"><div class="panel-heading">Add a research note</div><form id="note-form"><textarea name="body" class="field" rows="5" maxlength="10000" required placeholder="Today we derived the governing relationship for...\n\nNext: verify numerical response against baseline benchmark."></textarea><div style="display:flex;justify-content:flex-end;margin-top:11px"><button type="submit" class="button solid">＋ Save to notebook</button></div></form></div><div class="note-list section-spacer">${notes.length ? notes.map(n => `<div class="card note-card"><div class="note-meta"><span><strong>${esc(n.author_name || 'Researcher')}</strong> · ${timeDate(n.created_at)}</span><button class="text-link" data-delete-note="${n.id}">Delete</button></div><p>${esc(n.body)}</p></div>`).join('') : empty('≡', 'Notebook is empty', 'Create the first research note.')}</div></section><section class="card panel" style="align-self:start"><div class="panel-heading">Suggested note format</div><div class="mini-tip"><strong>Research activity</strong><br/>What calculations, modelling or writing were completed?</div><div class="mini-tip"><strong>Observations</strong><br/>What results, errors or limitations emerged?</div><div class="mini-tip"><strong>Decisions</strong><br/>Which assumptions and parameters were agreed upon?</div><div class="mini-tip"><strong>Next steps</strong><br/>What should each collaborator do next?</div></section></div>`;
 }
 
 function activityRows(rows) {
@@ -644,8 +706,37 @@ function activityPage() {
 
 function teamPage() {
   const m = state.data.members;
-  return `${pageHeading('COLLABORATION', 'Research team', 'Two researchers. One shared workspace and a common record of progress.')}
- <div class="two-col"><div class="card panel"><div class="panel-heading">Workspace members <span class="meta-tag">${m.length} of 2 seats</span></div>${m.map(u => `<div class="member-row"><div class="avatar">${esc(initials(u.name))}</div><div class="member-info"><strong>${esc(u.name)}</strong><small>${esc(u.email)}</small></div><div class="member-role">${u.role === 'owner' ? 'OWNER' : 'COLLABORATOR'}</div></div>`).join('')}</div><div class="card panel"><div class="panel-heading">Invite a collaborator</div>${state.user.role === 'owner' && m.length < 2 ? `<p class="small-text muted">Invite your IIT Delhi research colleague using their email address. A private one-time link will be generated for you to share securely.</p><form id="invite-form"><input type="email" name="email" class="field" required placeholder="colleague@iitd.ac.in" /><button class="button solid" style="margin-top:11px" type="submit">Generate invitation link</button></form><div id="invite-result"></div>` : m.length >= 2 ? `<div class="hint">Both research seats are occupied. Your workspace is ready for collaboration.</div>` : `<div class="hint">Ask the workspace owner to manage invitations.</div>`}</div></div>`;
+  const maxSeats = state.data.maxSeats || 10;
+  const isOwner = (state.workspace?.role || state.user.role) === 'owner';
+  const wsName = state.workspace?.name || 'Research Workspace';
+
+  return `${pageHeading('COLLABORATION', 'Research team', `Manage members for ${wsName}.`)}
+ <div class="two-col">
+   <div class="card panel">
+     <div class="panel-heading">Workspace members <span class="meta-tag">${m.length} of ${maxSeats} seats</span></div>
+     ${m
+       .map(
+         u =>
+           `<div class="member-row"><div class="avatar">${esc(initials(u.name))}</div><div class="member-info"><strong>${esc(u.name)}</strong><small>${esc(u.email)}</small></div><div class="member-role">${u.role === 'owner' ? 'OWNER' : 'COLLABORATOR'}</div></div>`
+       )
+       .join('')}
+   </div>
+   <div class="card panel">
+     <div class="panel-heading">Invite a teammate</div>
+     ${
+       isOwner && m.length < maxSeats
+         ? `<p class="small-text muted">Invite a research colleague to <strong>${esc(wsName)}</strong> using their email address. A private one-time link will be generated for you to share securely.</p>
+            <form id="invite-form">
+              <input type="email" name="email" class="field" required placeholder="colleague@university.edu" />
+              <button class="button solid" style="margin-top:11px" type="submit">Generate invitation link</button>
+            </form>
+            <div id="invite-result"></div>`
+         : m.length >= maxSeats
+           ? `<div class="hint">All ${maxSeats} workspace seats are occupied.</div>`
+           : `<div class="hint">Ask the workspace owner to generate new teammate invitations.</div>`
+     }
+   </div>
+ </div>`;
 }
 
 function openTask(task = null) {
@@ -759,6 +850,8 @@ async function boot() {
       return;
     }
     state.user = r.user;
+    state.workspace = r.workspace;
+    state.workspaces = r.workspaces || [];
     state.csrf = r.csrf;
     state.aiEnabled = r.aiEnabled;
     showApp();
@@ -782,9 +875,17 @@ async function boot() {
 document.addEventListener('submit', async e => {
   const form = e.target;
   if (
-    !['login-form', 'register-form', 'task-form', 'note-form', 'agent-form', 'quick-form', 'invite-form', 'file-notes-form'].includes(
-      form.id
-    )
+    ![
+      'login-form',
+      'register-form',
+      'accept-invite-form',
+      'task-form',
+      'note-form',
+      'agent-form',
+      'quick-form',
+      'invite-form',
+      'file-notes-form'
+    ].includes(form.id)
   )
     return;
   e.preventDefault();
@@ -794,6 +895,8 @@ document.addEventListener('submit', async e => {
     if (form.id === 'login-form') {
       const r = await api('/auth/login', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
       state.user = r.user;
+      state.workspace = r.workspace;
+      state.workspaces = r.workspaces || [];
       state.csrf = r.csrf;
       const b = await api('/bootstrap');
       state.aiEnabled = b.aiEnabled;
@@ -801,14 +904,29 @@ document.addEventListener('submit', async e => {
       await reload();
     }
     if (form.id === 'register-form') {
+      const r = await api('/auth/register', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
+      state.user = r.user;
+      state.workspace = r.workspace;
+      state.workspaces = r.workspaces || [];
+      state.csrf = r.csrf;
+      const b = await api('/bootstrap');
+      state.aiEnabled = b.aiEnabled;
+      toast('Workspace created!');
+      showApp();
+      await reload();
+    }
+    if (form.id === 'accept-invite-form') {
       const invite = new URLSearchParams(location.search).get('token');
       const data = Object.fromEntries(new FormData(form));
       const r = await api('/auth/accept', { method: 'POST', body: { ...data, token: invite } });
       state.user = r.user;
+      state.workspace = r.workspace;
+      state.workspaces = r.workspaces || [];
       state.csrf = r.csrf;
       history.replaceState({}, '', '/');
       const b = await api('/bootstrap');
       state.aiEnabled = b.aiEnabled;
+      toast('Joined workspace!');
       showApp();
       await reload();
     }
@@ -858,6 +976,11 @@ document.addEventListener('submit', async e => {
 document.addEventListener('click', async e => {
   const el = e.target.closest('button');
   if (!el) return;
+  if (el.hasAttribute('data-auth-mode')) {
+    state.authMode = el.dataset.authMode;
+    authView();
+    return;
+  }
   if (el.hasAttribute('data-page')) {
     goto(el.dataset.page);
     return;
@@ -901,6 +1024,8 @@ document.addEventListener('click', async e => {
     if (el.id === 'logout') {
       await api('/auth/logout', { method: 'POST' });
       state.user = null;
+      state.workspace = null;
+      state.workspaces = [];
       state.csrf = null;
       state.messages = [];
       state.pendingActions = [];
@@ -945,7 +1070,6 @@ document.addEventListener('click', async e => {
       render();
       const slot = $('file-summary');
       if (slot) slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // Auto-trigger extraction if extractable, AI enabled, and not yet analyzed
       if (file && !file.ai_review_data && isTextExtractable(file.original_name) && state.aiEnabled) {
         await runFileAnalysis(fileId, false);
       }
@@ -1070,6 +1194,44 @@ document.addEventListener('input', e => {
 
 document.addEventListener('change', async e => {
   const t = e.target;
+  if (t.id === 'workspace-switcher') {
+    if (t.value === '__new__') {
+      const name = prompt('Enter a name for your new research workspace:');
+      if (!name || !name.trim()) {
+        renderWorkspaceHeader();
+        return;
+      }
+      try {
+        const res = await api('/workspaces', { method: 'POST', body: { name: name.trim() } });
+        state.workspace = res.workspace;
+        state.workspaces = res.workspaces;
+        state.activeReviewFileId = null;
+        state.selectedFiles = [];
+        state.comparisonPapers = null;
+        toast(`Switched to "${res.workspace.name}"`);
+        showApp();
+        await reload();
+      } catch (err) {
+        toast(err.message, true);
+        renderWorkspaceHeader();
+      }
+      return;
+    }
+    try {
+      const res = await api('/workspaces/switch', { method: 'POST', body: { workspaceId: Number(t.value) } });
+      state.workspace = res.workspace;
+      state.workspaces = res.workspaces;
+      state.activeReviewFileId = null;
+      state.selectedFiles = [];
+      state.comparisonPapers = null;
+      toast(`Switched to "${res.workspace.name}"`);
+      showApp();
+      await reload();
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
   if (t.id === 'status-filter') {
     state.filter = t.value;
     render();
