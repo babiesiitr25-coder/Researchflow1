@@ -104,7 +104,7 @@ const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const clean = s => String(s || '').trim();
 const statuses = ['To do', 'In progress', 'Blocked', 'Done'];
 const priorities = ['Low', 'Medium', 'High'];
-const phases = ['Analytical', 'Numerical', 'Validation', 'Writing', 'Other'];
+const phases = ['Planning', 'Literature review', 'Close reading', 'Archival research', 'Fieldwork', 'Analysis', 'Analytical', 'Numerical', 'Validation', 'Writing', 'Revision', 'Other'];
 const readingStatuses = ['To Read', 'Skimming', 'Deep Read', 'Cited', 'Key Reference'];
 const token = () => crypto.randomBytes(28).toString('hex');
 const inviteCode = () => crypto.randomBytes(6).toString('hex');
@@ -172,10 +172,10 @@ async function required(req, res, next) {
   }
 }
 
-async function activity(client, workspaceId, actor, description) {
+async function activity(client, workspaceId, actor, description, kind = null, recordId = null) {
   await client.query(
-    'INSERT INTO activities(workspace_id,actor_id,description) VALUES($1,$2,$3)',
-    [workspaceId, actor, description.slice(0, 450)]
+    'INSERT INTO activities(workspace_id,actor_id,description,record_kind,record_id) VALUES($1,$2,$3,$4,$5)',
+    [workspaceId, actor, description.slice(0, 450), kind, recordId]
   );
 }
 
@@ -204,6 +204,16 @@ async function initialize() {
   await q(`CREATE TABLE IF NOT EXISTS notes(id SERIAL PRIMARY KEY,workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,body TEXT NOT NULL,author_id INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW())`);
   await q(`CREATE TABLE IF NOT EXISTS research_files(id SERIAL PRIMARY KEY,workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,original_name TEXT NOT NULL,mime_type TEXT NOT NULL,bytes INTEGER NOT NULL,content BYTEA NOT NULL,uploaded_by INTEGER REFERENCES users(id),created_at TIMESTAMPTZ DEFAULT NOW())`);
   await q(`CREATE TABLE IF NOT EXISTS activities(id SERIAL PRIMARY KEY,workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,actor_id INTEGER REFERENCES users(id),description TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW())`);
+
+  await q(`CREATE TABLE IF NOT EXISTS task_sources(
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    source_id INTEGER NOT NULL REFERENCES research_files(id) ON DELETE CASCADE,
+    PRIMARY KEY(task_id,source_id)
+  );
+  ALTER TABLE notes ADD COLUMN IF NOT EXISTS source_id INTEGER REFERENCES research_files(id) ON DELETE SET NULL;
+  ALTER TABLE notes ADD COLUMN IF NOT EXISTS task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;
+  ALTER TABLE activities ADD COLUMN IF NOT EXISTS record_kind TEXT;
+  ALTER TABLE activities ADD COLUMN IF NOT EXISTS record_id INTEGER;`);
 
   await q(`
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE;
@@ -245,7 +255,7 @@ async function initialize() {
   if (!defaultWs.rowCount) {
     const wsIns = await q(
       'INSERT INTO workspaces(name,invite_code) VALUES($1,$2) RETURNING id',
-      ['Geotechnical Research', inviteCode()]
+      ['Research workspace', inviteCode()]
     );
     defaultWsId = wsIns.rows[0].id;
   } else {
@@ -558,14 +568,14 @@ app.get('/api/dashboard', required, async (req, res, next) => {
     const wsId = req.workspaceId;
     const [tasks, notes, files, activities, members] = await Promise.all([
       q(
-        `SELECT t.*,to_char(t.due_date,'YYYY-MM-DD') AS due_date,u.name AS assignee_name
+        `SELECT t.*,ARRAY(SELECT source_id FROM task_sources WHERE task_id=t.id) AS source_ids,to_char(t.due_date,'YYYY-MM-DD') AS due_date,u.name AS assignee_name
          FROM tasks t LEFT JOIN users u ON t.assignee_id=u.id
          WHERE t.workspace_id=$1
          ORDER BY CASE t.status WHEN 'In progress' THEN 0 WHEN 'Blocked' THEN 1 WHEN 'To do' THEN 2 ELSE 3 END, t.updated_at DESC LIMIT 500`,
         [wsId]
       ),
       q(
-        `SELECT n.id,n.body,n.created_at,u.name AS author_name
+        `SELECT n.id,n.source_id,n.task_id,n.body,n.created_at,u.name AS author_name
          FROM notes n LEFT JOIN users u ON u.id=n.author_id
          WHERE n.workspace_id=$1
          ORDER BY n.created_at DESC LIMIT 100`,
@@ -581,7 +591,7 @@ app.get('/api/dashboard', required, async (req, res, next) => {
         [wsId]
       ),
       q(
-        `SELECT a.id,a.description,a.created_at,u.name AS actor_name
+        `SELECT a.id,a.record_kind,a.record_id,a.description,a.created_at,u.name AS actor_name
          FROM activities a LEFT JOIN users u ON u.id=a.actor_id
          WHERE a.workspace_id=$1
          ORDER BY a.created_at DESC LIMIT 100`,
@@ -649,6 +659,24 @@ function normalTask(payload, partial = false) {
   return out;
 }
 
+async function checkRecord(client, table, workspace, id) {
+  if (id == null) return;
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('Invalid linked record');
+  const r = await client.query(`SELECT id FROM ${table} WHERE id=$1 AND workspace_id=$2 FOR KEY SHARE`, [id, workspace]);
+  if (!r.rowCount) throw new Error('Invalid linked record in this workspace');
+}
+
+async function updateSources(client, workspace, task, changes = {}) {
+  for (const [action, ids] of Object.entries(changes)) {
+    if (!['add','remove'].includes(action) || !Array.isArray(ids) || ids.length > 200) throw new Error('Invalid source links');
+    for (const id of new Set(ids)) {
+      await checkRecord(client, 'research_files', workspace, id);
+      if (action === 'add') await client.query('INSERT INTO task_sources VALUES($1,$2) ON CONFLICT DO NOTHING', [task,id]);
+      else await client.query('DELETE FROM task_sources WHERE task_id=$1 AND source_id=$2', [task,id]);
+    }
+  }
+}
+
 app.post('/api/tasks', required, async (req, res, next) => {
   try {
     const t = normalTask(req.body);
@@ -666,7 +694,8 @@ app.post('/api/tasks', required, async (req, res, next) => {
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
         [wsId, t.title, t.description || '', t.phase || 'Other', t.status || 'To do', t.priority || 'Medium', t.assignee_id || null, t.due_date || null, req.session.userId]
       );
-      await activity(c, wsId, req.session.userId, `Created task: ${t.title}`);
+      await updateSources(c, wsId, result.rows[0].id, req.body.sources);
+      await activity(c, wsId, req.session.userId, `Created task: ${t.title}`, 'task', result.rows[0].id);
       return result.rows[0];
     });
     res.status(201).json(r);
@@ -697,7 +726,8 @@ app.patch('/api/tasks/:id', required, async (req, res, next) => {
         [...values, req.params.id, wsId]
       );
       if (!r.rowCount) throw new Error('Task not found');
-      await activity(c, wsId, req.session.userId, `Updated task: ${r.rows[0].title}${t.status ? ' → ' + t.status : ''}`);
+      await updateSources(c, wsId, r.rows[0].id, req.body.sources);
+      await activity(c, wsId, req.session.userId, `Updated task: ${r.rows[0].title}${t.status ? ' → ' + t.status : ''}`, 'task', r.rows[0].id);
       return r.rows[0];
     });
     res.json(saved);
@@ -732,15 +762,19 @@ app.post('/api/notes', required, async (req, res, next) => {
     const wsId = req.workspaceId;
     if (!body || body.length > 10000) return err(res, 'Note must be 1–10000 characters');
     const created = await transaction(async c => {
+      const {sourceId = null, taskId = null} = req.body;
+      await checkRecord(c, 'research_files', wsId, sourceId);
+      await checkRecord(c, 'tasks', wsId, taskId);
       const r = await c.query(
-        'INSERT INTO notes(workspace_id,body,author_id) VALUES($1,$2,$3) RETURNING *',
-        [wsId, body, req.session.userId]
+        'INSERT INTO notes(workspace_id,body,author_id,source_id,task_id) VALUES($1,$2,$3,$4,$5) RETURNING *',
+        [wsId, body, req.session.userId, sourceId, taskId]
       );
-      await activity(c, wsId, req.session.userId, 'Added research note: ' + body.slice(0, 90));
+      await activity(c, wsId, req.session.userId, 'Added research note: ' + body.slice(0, 90), 'note', r.rows[0].id);
       return r.rows[0];
     });
     res.status(201).json(created);
   } catch (e) {
+    if (/Invalid linked/.test(e.message)) return err(res, e.message);
     next(e);
   }
 });
@@ -779,7 +813,7 @@ app.post('/api/files', required, uploads.single('file'), async (req, res, next) 
          RETURNING id,original_name,mime_type,bytes,created_at,reading_status,project_phase,tags,citation_meta,user_notes,ai_review_data`,
         [wsId, original, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.session.userId, phase]
       );
-      await activity(c, wsId, req.session.userId, 'Uploaded file: ' + original);
+      await activity(c, wsId, req.session.userId, 'Uploaded file: ' + original, 'file', r.rows[0].id);
       return r.rows[0];
     });
     res.status(201).json(stored);
@@ -847,7 +881,7 @@ app.patch('/api/files/:id/metadata', required, async (req, res, next) => {
         ]
       );
       if (!r.rowCount) throw new Error('File not found');
-      await activity(c, wsId, req.session.userId, `Updated literature metadata: ${r.rows[0].original_name}`);
+      await activity(c, wsId, req.session.userId, `Updated literature metadata: ${r.rows[0].original_name}`, 'file', r.rows[0].id);
       return r.rows[0];
     });
 
@@ -966,7 +1000,7 @@ function validateActions(actions, tasks) {
 
 async function openaiInterpret(message, workspaceName, tasks, notes, files) {
   const apiKey = clean(OPENAI_API_KEY);
-  const sys = `You are a research-collaboration task assistant for the "${workspaceName}" research workspace. Interpret the user's command based ONLY on supplied existing tasks, notes, and file names. Respond as a JSON object with keys "reply" (brief human-readable text) and "actions" (array, maximum 8). Actions are {"type":"add_task","title":"...","description":"...","phase":"Analytical|Numerical|Validation|Writing|Other","priority":"Low|Medium|High"} or {"type":"update_task","taskId":INTEGER,"status":"To do|In progress|Blocked|Done"} or {"type":"add_note","body":"..."}. Do NOT mutate anything unless specifically requested. Do NOT fabricate experiment results, file contents, completion statuses, numerical parameters, or task IDs. Never claim to have analyzed the actual contents of attached files: only filenames are provided. If the user asks for a summary, produce a read-only reply and actions=[]. If the request is ambiguous, explain and use actions=[]. A sentence saying someone did a completed piece of work may justify marking a clearly matching existing task Done; if unclear ask. Keep reply concise.`;
+  const sys = `You are a research-collaboration task assistant for the "${workspaceName}" research workspace. Interpret the user's command based ONLY on supplied existing tasks, notes, and file names. Respond as a JSON object with keys "reply" (brief human-readable text) and "actions" (array, maximum 8). Actions are {"type":"add_task","title":"...","description":"...","phase":"${phases.join('|')}","priority":"Low|Medium|High"} or {"type":"update_task","taskId":INTEGER,"status":"To do|In progress|Blocked|Done"} or {"type":"add_note","body":"..."}. Do NOT mutate anything unless specifically requested. Do NOT fabricate experiment results, file contents, completion statuses, numerical parameters, or task IDs. Never claim to have analyzed the actual contents of attached files: only filenames are provided. If the user asks for a summary, produce a read-only reply and actions=[]. If the request is ambiguous, explain and use actions=[]. A sentence saying someone did a completed piece of work may justify marking a clearly matching existing task Done; if unclear ask. Keep reply concise.`;
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -1045,11 +1079,11 @@ app.post('/api/agent/apply', required, async (req, res, next) => {
     await transaction(async c => {
       for (const a of safe) {
         if (a.type === 'add_task') {
-          await c.query(
-            'INSERT INTO tasks(workspace_id,title,description,phase,priority,created_by) VALUES($1,$2,$3,$4,$5,$6)',
+          const created = await c.query(
+            'INSERT INTO tasks(workspace_id,title,description,phase,priority,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id',
             [wsId, a.title, a.description, a.phase, a.priority, req.session.userId]
           );
-          await activity(c, wsId, req.session.userId, 'AI-assisted: created task ' + a.title);
+          await activity(c, wsId, req.session.userId, 'AI-assisted: created task ' + a.title, 'task', created.rows[0].id);
         }
         if (a.type === 'update_task') {
           const r = await c.query(
@@ -1057,11 +1091,11 @@ app.post('/api/agent/apply', required, async (req, res, next) => {
             [a.status, a.taskId, wsId]
           );
           if (!r.rowCount) throw new Error('Task disappeared; request a new interpretation');
-          await activity(c, wsId, req.session.userId, `AI-assisted: ${r.rows[0].title} → ${a.status}`);
+          await activity(c, wsId, req.session.userId, `AI-assisted: ${r.rows[0].title} → ${a.status}`, 'task', a.taskId);
         }
         if (a.type === 'add_note') {
-          await c.query('INSERT INTO notes(workspace_id,body,author_id) VALUES($1,$2,$3)', [wsId, a.body, req.session.userId]);
-          await activity(c, wsId, req.session.userId, 'AI-assisted: added research note');
+          const created = await c.query('INSERT INTO notes(workspace_id,body,author_id) VALUES($1,$2,$3) RETURNING id', [wsId, a.body, req.session.userId]);
+          await activity(c, wsId, req.session.userId, 'AI-assisted: added research note', 'note', created.rows[0].id);
         }
       }
     });
@@ -1109,12 +1143,12 @@ Return ONLY valid JSON with these exact keys:
     "bibtex": "Valid @article or @misc BibTeX entry"
   },
   "objective": "Primary research objective and problem statement",
-  "methodology": "Analytical, numerical, or experimental methodology and assumptions",
-  "governing_equations_and_params": "Key equations, model parameters, and boundary conditions reported",
+  "methodology": "Research approach, interpretive framework or technical method used",
+  "governing_equations_and_params": "Relevant concepts, textual evidence, archival materials or technical equations and parameters. Include page references only when present.",
   "key_findings": "Main quantitative and qualitative conclusions",
   "limitations_and_gaps": "Limitations, assumptions, and open research questions",
   "suggested_tags": ["short-tag-1", "short-tag-2", "short-tag-3"],
-  "formatted_summary": "A clear, structured Markdown literature review summary covering Objective, Methodology, Key Equations/Parameters, Main Findings, and Open Questions/Next Tasks."
+  "formatted_summary": "A clear, structured Markdown literature review summary covering Objective, Methodology, Evidence and Concepts, Main Findings, and Open Questions/Next Tasks."
 }`;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
