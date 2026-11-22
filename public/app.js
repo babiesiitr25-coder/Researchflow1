@@ -45,7 +45,7 @@ const initials = name =>
     .toUpperCase();
 
 const statuses = ['To do', 'In progress', 'Blocked', 'Done'];
-const phases = ['Analytical', 'Numerical', 'Validation', 'Writing', 'Other'];
+const phases = ['Planning', 'Literature review', 'Close reading', 'Archival research', 'Fieldwork', 'Analysis', 'Analytical', 'Numerical', 'Validation', 'Writing', 'Revision', 'Other'];
 const readingStatuses = ['To Read', 'Skimming', 'Deep Read', 'Cited', 'Key Reference'];
 
 const toast = (message, error = false) => {
@@ -132,7 +132,7 @@ function authView() {
       <p>Set up a private workspace for your lab, thesis, or research team in seconds.</p>
       <form id="register-form">
         <label>Your full name<input name="name" class="field" placeholder="Dr. Jane Doe" required maxlength="90" /></label>
-        <label>Workspace / lab name<input name="workspaceName" class="field" placeholder="e.g. Structural Dynamics Lab" required maxlength="100" /></label>
+        <label>Workspace name<input name="workspaceName" class="field" placeholder="e.g. Research and Writing Group" required maxlength="100" /></label>
         <label>Email address<input name="email" type="email" class="field" autocomplete="username" placeholder="researcher@institution.edu" required /></label>
         <label>Password<input name="password" type="password" class="field" minlength="12" autocomplete="new-password" placeholder="Minimum 12 characters" required /></label>
         <button class="button solid" type="submit">Create workspace →</button>
@@ -196,6 +196,7 @@ function renderSidebar() {
     .map(p => {
       const taskCount = t.filter(x => x.phase === p).length;
       const fileCount = f.filter(x => (x.project_phase || 'Other') === p).length;
+      if (!taskCount && !fileCount) return '';
       return `<div class="sidebar-phase" title="${taskCount} task(s), ${fileCount} file(s)"><span><span class="phase-dot"></span>${p}</span><span class="phase-count">${taskCount + fileCount}</span></div>`;
     })
     .join('');
@@ -209,7 +210,7 @@ function render() {
     tasks: 'Task board',
     agent: 'AI research agent',
     files: 'Research library',
-    notes: 'Lab notebook',
+    notes: 'Research notebook',
     activity: 'Activity timeline',
     team: 'Team'
   };
@@ -269,8 +270,8 @@ function overviewPage() {
   const wsName = state.workspace?.name || 'Shared research workspace';
   return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
  <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
- <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Completion is measured by completed tasks, not experimental validity or manuscript readiness.</p></section>
- <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Validate numerical simulation results">＋ Add validation task</button></div></section></div>
+ <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Progress shows the share of tasks marked done.</p></section>
+ <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Compare two primary sources">＋ Add reading task</button></div></section></div>
  <div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
 }
 
@@ -287,7 +288,7 @@ function filteredTasks() {
 
 function tasksPage() {
   const total = state.data.tasks.length;
-  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Plan experiments, assign ownership, and track every milestone.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks or experiments..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${table(filteredTasks())}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
+  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Organise reading, fieldwork, analysis and writing. Link each task to its sources.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${table(filteredTasks())}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
 }
 
 function agentPage() {
@@ -302,7 +303,7 @@ function agentPage() {
   const proposals = state.pendingActions.length
     ? `<div class="action-review"><strong>PROPOSED CHANGES · REVIEW BEFORE APPLYING</strong><ul>${state.pendingActions.map(a => `<li>${esc(describeAction(a))}</li>`).join('')}</ul><div class="action-buttons"><button class="button teal small" id="confirm-actions">✓ Apply ${state.pendingActions.length} update(s)</button><button class="button secondary small" id="discard-actions">Discard</button></div></div>`
     : '';
-  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000"></textarea><button class="button solid" type="submit">Send ↗</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed literature review matrix”', '“Started numerical model validation”', '“Add task: Compare baseline boundary conditions”', '“Note: Agreed on mesh convergence tolerance”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal">${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
+  return `${pageHeading('NATURAL LANGUAGE WORKFLOW', 'AI research agent', 'Talk to your project workspace instead of navigating multiple forms.', `<span class="meta-tag">${state.aiEnabled ? 'AI-POWERED' : 'QUICK COMMAND MODE'}</span>`)}<div class="agent-page-layout"><section class="card panel agent-main"><div class="panel-heading">✧ Research copilot <span class="small-text muted">Actions require approval</span></div><div class="chat-scroll" id="chat-scroll">${messages.map(m => `<div class="chat-bubble ${m.role}">${esc(m.text)}</div>`).join('')}</div>${proposals}<form id="agent-form" class="agent-compose"><textarea id="agent-message" name="message" rows="2" placeholder="Type what you completed, started, or want to add..." required maxlength="3000"></textarea><button class="button solid" type="submit">Send ↗</button></form><p class="muted" style="font-size:10px">${state.aiEnabled ? 'Commands are sent securely from the server to the configured AI provider.' : 'Add OPENAI_API_KEY on the server for full natural-language AI. Basic commands work without it.'}</p></section><aside class="card panel"><div class="panel-heading">Things you can ask</div>${['“Completed literature review matrix”', '“Started chapter revision”', '“Add task: Compare two translations”', '“Note: Check the edition before citing this passage”', '“Show project progress”'].map(x => `<button class="mini-tip text-link" data-prompt="${esc(x.slice(1, -1))}" style="text-align:left;display:block;width:100%;white-space:normal">${esc(x)} ↗</button>`).join('')}<div class="hint" style="margin-top:22px">The agent will never mark work complete or add notes without presenting the proposed changes for your approval.</div></aside></div>`;
 }
 
 function describeAction(a) {
@@ -377,7 +378,7 @@ function renderFileListOrMatrix(files) {
           <th>Paper / File</th>
           <th>Phase & Status</th>
           <th>Objective & Methodology</th>
-          <th>Equations & Parameters</th>
+          <th>Evidence & Concepts</th>
           <th>Key Findings & Gaps</th>
           <th>Actions</th>
         </tr>
@@ -498,6 +499,8 @@ function renderActiveReviewDrawer() {
   const extractable = isTextExtractable(f.original_name);
 
   return `<div id="file-summary" class="card panel section-spacer" style="border-left:3px solid var(--accent,#0d9488)">
+    <div class="mini-tip"><strong>Linked tasks</strong> ${state.data.tasks.filter(t => t.source_ids?.includes(f.id)).map(t => recordLink('task',t.id)).join(' ') || 'No linked tasks yet.'}
+    ${relatedNotes('source_id',f.id)}${recordHistory('file',f.id)}</div>
     <div class="panel-heading" style="flex-wrap:wrap;gap:8px">
       <span>✧ Literature Review & Notes · <strong>${esc(f.original_name)}</strong></span>
       <div class="inline-actions" style="flex-wrap:wrap">
@@ -509,7 +512,7 @@ function renderActiveReviewDrawer() {
             : ''
         }
         <button class="button secondary small" data-copy-bibtex="${f.id}">📋 Copy BibTeX</button>
-        <button class="button secondary small" data-send-to-notebook="${f.id}">＋ Send to Lab Notebook</button>
+        <button class="button secondary small" data-send-to-notebook="${f.id}">＋ Send to Research Notebook</button>
         <button class="button secondary small" data-task-from-file="${f.id}">＋ Follow-up Task</button>
         <button class="text-link" id="dismiss-summary">Close ✕</button>
       </div>
@@ -529,13 +532,13 @@ function renderActiveReviewDrawer() {
         ? `<div class="two-col" style="margin-bottom:16px">
             <div class="mini-tip"><strong>1. Research Objective</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.objective || '—')}</p></div>
             <div class="mini-tip"><strong>2. Methodology & Model</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.methodology || '—')}</p></div>
-            <div class="mini-tip"><strong>3. Governing Equations & Parameters</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.governing_equations_and_params || '—')}</p></div>
+            <div class="mini-tip"><strong>3. Evidence, Concepts & Parameters</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.governing_equations_and_params || '—')}</p></div>
             <div class="mini-tip"><strong>4. Key Findings & Conclusions</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.key_findings || '—')}</p></div>
           </div>
           <div class="mini-tip" style="margin-bottom:16px"><strong>5. Limitations & Research Gaps</strong><p style="margin:6px 0 0;white-space:pre-wrap">${esc(rev.limitations_and_gaps || '—')}</p></div>
           ${rev.truncated ? '<div class="hint" style="margin-bottom:14px">Note: Middle sections were truncated to fit model context limits.</div>' : ''}`
         : extractable
-          ? `<div class="hint" style="margin-bottom:16px">No structured AI review cached yet. Click <strong>Run AI Extraction</strong> above to extract Objective, Methodology, Governing Equations, Findings, and BibTeX automatically.</div>`
+          ? `<div class="hint" style="margin-bottom:16px">No structured AI review cached yet. Click <strong>Run AI Extraction</strong> above to extract Objective, Methodology, Evidence, Findings, and BibTeX automatically.</div>`
           : ''
     }
 
@@ -561,8 +564,8 @@ function renderActiveReviewDrawer() {
         </div>
       </div>
       <label style="display:block">
-        <span class="small-text"><strong>Personal Literature Notes, Equations & Parameters</strong></span>
-        <textarea name="user_notes" class="field" rows="4" placeholder="Record key equations, boundary conditions, parameter values, or how this paper compares to your work...">${esc(f.user_notes || '')}</textarea>
+        <span class="small-text"><strong>Personal Literature Notes, Evidence & Concepts</strong></span>
+        <textarea name="user_notes" class="field" rows="4" placeholder="Record a passage and page number, an archival reference, a model assumption or your interpretation...">${esc(f.user_notes || '')}</textarea>
       </label>
       <div style="display:flex;justify-content:flex-end;margin-top:10px">
         <button type="submit" class="button solid small">✓ Save Notes & Tags</button>
@@ -579,7 +582,7 @@ function renderComparisonPanel() {
     { label: 'Phase & Status', fn: p => `${p.project_phase || 'Other'} · ${p.reading_status || 'To Read'}` },
     { label: 'Objective', fn: p => p.ai_review_data?.objective || 'Not extracted yet' },
     { label: 'Methodology', fn: p => p.ai_review_data?.methodology || 'Not extracted yet' },
-    { label: 'Equations & Parameters', fn: p => p.ai_review_data?.governing_equations_and_params || 'Not extracted yet' },
+    { label: 'Evidence & Concepts', fn: p => p.ai_review_data?.governing_equations_and_params || 'Not extracted yet' },
     { label: 'Key Findings', fn: p => p.ai_review_data?.key_findings || 'Not extracted yet' },
     { label: 'Limitations & Gaps', fn: p => p.ai_review_data?.limitations_and_gaps || 'Not extracted yet' },
     { label: 'Your Notes', fn: p => p.user_notes || '—' }
@@ -622,7 +625,7 @@ function filesPage() {
   return `${pageHeading(
     'KNOWLEDGE BASE & LITERATURE REVIEW',
     'Research library',
-    'Organize papers, extract governing equations and methodology, compare findings, and link notes to your workflow.',
+    'Collect primary texts, articles and research materials. Compare evidence and connect it to your notes and tasks.',
     `<span class="meta-tag">${allFiles.length} files · ${analyzedCount} extracted · ${citedCount} key/cited</span>`
   )}
   <label for="file-input" id="drop-zone" class="file-drop" style="display:block">
@@ -639,7 +642,7 @@ function filesPage() {
   <div class="card panel section-spacer">
     <div class="filter-bar" style="margin-bottom:14px">
       <div class="search-box">
-        <input class="field" id="lib-search" placeholder="Search title, author, tag, equation, or note..." value="${esc(state.libSearch)}" />
+        <input class="field" id="lib-search" placeholder="Search title, author, tag, concept, or note..." value="${esc(state.libSearch)}" />
       </div>
       <select class="field" id="lib-status-filter">
         <option value="All">All statuses</option>
@@ -684,10 +687,32 @@ const formatBytes = n =>
 const empty = (symbol, title, help) =>
   `<div class="empty-state"><div class="empty-symbol">${symbol}</div><strong>${esc(title)}</strong><span>${esc(help)}</span></div>`;
 
+function recordLink(kind, id) {
+  const rows = {task: state.data.tasks, file: state.data.files, note: state.data.notes}[kind];
+  const row = rows?.find(r => r.id === id);
+  if (!row) return '';
+  const label = row.title || row.original_name || row.body.slice(0,65);
+  return `<button type="button" class="tiny-btn" data-record="${kind}" data-record-id="${id}">${esc(label)}</button>`;
+}
+
+function relatedNotes(key, id) {
+  const rows = state.data.notes.filter(n => n[key] === id);
+  return rows.length ? `<p><strong>Notebook</strong> ${rows.map(n => recordLink('note',n.id)).join(' ')}</p>` : '';
+}
+
+function recordHistory(kind, id) {
+  const rows = state.data.activities.filter(a => a.record_kind === kind && a.record_id === id);
+  return rows.length ? `<details><summary>Recent activity (${rows.length})</summary>${rows.map(a => `<p>${timeDate(a.created_at)} · ${esc(a.actor_name)} · ${esc(a.description)}</p>`).join('')}</details>` : '';
+}
+
+function recordOptions(rows, field) {
+  return '<option value="">None</option>' + rows.map(r => `<option value="${r.id}">${esc(r[field])}</option>`).join('');
+}
+
 function notesPage() {
   const notes = state.data.notes;
-  return `${pageHeading('RESEARCH JOURNAL', 'Lab notebook', 'Document decisions, meetings, methods, breakthroughs, and next steps.')}
- <div class="two-col"><section><div class="card panel"><div class="panel-heading">Add a research note</div><form id="note-form"><textarea name="body" class="field" rows="5" maxlength="10000" required placeholder="Today we derived the governing relationship for...\n\nNext: verify numerical response against baseline benchmark."></textarea><div style="display:flex;justify-content:flex-end;margin-top:11px"><button type="submit" class="button solid">＋ Save to notebook</button></div></form></div><div class="note-list section-spacer">${notes.length ? notes.map(n => `<div class="card note-card"><div class="note-meta"><span><strong>${esc(n.author_name || 'Researcher')}</strong> · ${timeDate(n.created_at)}</span><button class="text-link" data-delete-note="${n.id}">Delete</button></div><p>${esc(n.body)}</p></div>`).join('') : empty('≡', 'Notebook is empty', 'Create the first research note.')}</div></section><section class="card panel" style="align-self:start"><div class="panel-heading">Suggested note format</div><div class="mini-tip"><strong>Research activity</strong><br/>What calculations, modelling or writing were completed?</div><div class="mini-tip"><strong>Observations</strong><br/>What results, errors or limitations emerged?</div><div class="mini-tip"><strong>Decisions</strong><br/>Which assumptions and parameters were agreed upon?</div><div class="mini-tip"><strong>Next steps</strong><br/>What should each collaborator do next?</div></section></div>`;
+  return `${pageHeading('RESEARCH JOURNAL', 'Research notebook', 'Document decisions, meetings, methods, breakthroughs, and next steps.')}
+ <div class="two-col"><section><div class="card panel"><div class="panel-heading">Add a research note</div><form id="note-form"><div class="form-grid"><label>Related task<select class="field" name="taskId">${recordOptions(state.data.tasks,'title')}</select></label><label>Library source<select class="field" name="sourceId">${recordOptions(state.data.files,'original_name')}</select></label></div><textarea name="body" class="field" rows="5" maxlength="10000" required placeholder="Record a passage, observation or decision. Include a page or archive reference."></textarea><div style="display:flex;justify-content:flex-end;margin-top:11px"><button type="submit" class="button solid">＋ Save to notebook</button></div></form></div><div class="note-list section-spacer">${notes.length ? notes.map(n => `<div class="card note-card" id="note-${n.id}" tabindex="-1"><div class="note-meta"><span><strong>${esc(n.author_name || 'Researcher')}</strong> · ${timeDate(n.created_at)}</span><button class="text-link" data-delete-note="${n.id}">Delete</button></div><p>${esc(n.body)}</p>${recordLink('task',n.task_id)} ${recordLink('file',n.source_id)}${recordHistory('note',n.id)}</div>`).join('') : empty('≡', 'Notebook is empty', 'Create the first research note.')}</div></section><section class="card panel" style="align-self:start"><div class="panel-heading">Suggested note format</div><div class="mini-tip"><strong>Research activity</strong><br/>Which sources, methods or questions did you work on?</div><div class="mini-tip"><strong>Observations</strong><br/>What results, errors or limitations emerged?</div><div class="mini-tip"><strong>Decisions</strong><br/>Which interpretations or assumptions did you agree on?</div><div class="mini-tip"><strong>Next steps</strong><br/>What should each collaborator do next?</div></section></div>`;
 }
 
 function activityRows(rows) {
@@ -695,7 +720,7 @@ function activityRows(rows) {
   return rows
     .map(
       a =>
-        `<div class="timeline-entry"><span class="timeline-avatar">${esc(initials(a.actor_name))}</span><div><strong>${esc(a.description)}</strong><p>${esc(a.actor_name || 'Workspace')} · ${timeDate(a.created_at)}</p></div></div>`
+        `<div class="timeline-entry"><span class="timeline-avatar">${esc(initials(a.actor_name))}</span><div><strong>${esc(a.description)}</strong><p>${esc(a.actor_name || 'Workspace')} · ${timeDate(a.created_at)}</p>${recordLink(a.record_kind,a.record_id)}</div></div>`
     )
     .join('');
 }
@@ -747,7 +772,19 @@ function openTask(task = null) {
   f.elements.id.value = task?.id || '';
   f.elements.title.value = task?.title || '';
   f.elements.description.value = task?.description || '';
-  f.elements.phase.value = task?.phase || 'Analytical';
+  f.elements.phase.innerHTML = phases.map(p => `<option>${esc(p)}</option>`).join('');
+  f.elements.phase.value = task?.phase || 'Planning';
+  $('task-links')?.remove();
+  const links = document.createElement('section');
+  links.id = 'task-links';
+  links.className = 'mini-tip';
+  const original = task?.id ? task.source_ids || [] : [];
+  const selected = task?.source_ids || [];
+  links.innerHTML = `<details><summary>Library sources (${selected.length})</summary>
+    <div style="max-height:12rem;overflow:auto">${state.data.files.map(file => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" data-source-id="${file.id}" data-original="${original.includes(file.id)}" ${selected.includes(file.id) ? 'checked' : ''}>${esc(file.original_name)}</label>`).join('') || 'Upload a source in the research library.'}</div></details>
+    ${selected.map(id => recordLink('file',id)).join(' ')}
+    ${task?.id ? relatedNotes('task_id',task.id) + recordHistory('task',task.id) : ''}`;
+  f.querySelector('.dialog-actions').before(links);
   f.elements.status.value = task?.status || 'To do';
   f.elements.priority.value = task?.priority || 'Medium';
   f.elements.dueDate.value = task?.due_date ? String(task.due_date).slice(0, 10) : '';
@@ -762,6 +799,10 @@ async function createTask(form) {
   const data = Object.fromEntries(new FormData(form));
   const id = data.id;
   const body = {
+    sources: {
+      add: [...form.querySelectorAll('[data-source-id]:checked')].filter(i => i.dataset.original === 'false').map(i => Number(i.dataset.sourceId)),
+      remove: [...form.querySelectorAll('[data-source-id]:not(:checked)')].filter(i => i.dataset.original === 'true').map(i => Number(i.dataset.sourceId))
+    },
     title: data.title,
     description: data.description,
     phase: data.phase,
@@ -872,6 +913,20 @@ async function boot() {
   }
 }
 
+document.addEventListener('input', e => {
+  if (e.target.id !== 'find-query') return;
+  const term = e.target.value.trim().toLowerCase();
+  const groups = [
+    ['Tasks','task',state.data.tasks,r => [r.title,r.description,r.phase]],
+    ['Library','file',state.data.files,r => [r.original_name,r.user_notes,r.tags,r.citation_meta?.authors]],
+    ['Notebook','note',state.data.notes,r => [r.body,r.author_name]]
+  ];
+  $('find-results').innerHTML = term ? groups.map(([label,kind,records,fields]) => {
+    const rows = records.filter(r => fields(r).join(' ').toLowerCase().includes(term)).slice(0,12);
+    return rows.length ? `<section><h3>${label}</h3><p>${rows.map(r => recordLink(kind,r.id)).join(' ')}</p></section>` : '';
+  }).join('') || '<p>No matching records in the current workspace view.</p>' : '';
+});
+
 document.addEventListener('submit', async e => {
   const form = e.target;
   if (
@@ -933,7 +988,7 @@ document.addEventListener('submit', async e => {
     if (form.id === 'task-form') await createTask(form);
     if (form.id === 'note-form') {
       const body = form.elements.body.value;
-      await api('/notes', { method: 'POST', body: { body } });
+      await api('/notes', { method: 'POST', body: { body, sourceId: Number(form.elements.sourceId.value) || null, taskId: Number(form.elements.taskId.value) || null } });
       toast('Research note saved');
       await reload();
     }
@@ -976,6 +1031,31 @@ document.addEventListener('submit', async e => {
 document.addEventListener('click', async e => {
   const el = e.target.closest('button');
   if (!el) return;
+  if (el.id === 'open-finder') {
+    const finder = $('find-records');
+    finder.showModal();
+    $('find-query').value = '';
+    $('find-results').replaceChildren();
+    $('find-query').focus();
+    return;
+  }
+  if (el.dataset.record) {
+    if ($('task-dialog').open) $('task-dialog').close();
+    const id = Number(el.dataset.recordId);
+    $('find-records')?.close();
+    if (el.dataset.record === 'task') {
+      goto('tasks');
+      openTask(state.data.tasks.find(t => t.id === id));
+    } else if (el.dataset.record === 'file') {
+      state.activeReviewFileId = id;
+      goto('files');
+      $('file-summary')?.scrollIntoView({block:'start'});
+    } else {
+      goto('notes');
+      $('note-' + id)?.focus();
+    }
+    return;
+  }
   if (el.hasAttribute('data-auth-mode')) {
     state.authMode = el.dataset.authMode;
     authView();
@@ -1070,9 +1150,6 @@ document.addEventListener('click', async e => {
       render();
       const slot = $('file-summary');
       if (slot) slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      if (file && !file.ai_review_data && isTextExtractable(file.original_name) && state.aiEnabled) {
-        await runFileAnalysis(fileId, false);
-      }
       return;
     }
     if (el.hasAttribute('data-summarize')) {
@@ -1095,10 +1172,10 @@ document.addEventListener('click', async e => {
       if (f) {
         const rev = f.ai_review_data;
         const body = rev
-          ? `Literature Review — ${f.original_name}\n\nObjective: ${rev.objective || '—'}\n\nMethodology: ${rev.methodology || '—'}\n\nEquations & Parameters: ${rev.governing_equations_and_params || '—'}\n\nKey Findings: ${rev.key_findings || '—'}${f.user_notes ? `\n\nNotes: ${f.user_notes}` : ''}`
+          ? `Literature Review — ${f.original_name}\n\nObjective: ${rev.objective || '—'}\n\nMethodology: ${rev.methodology || '—'}\n\nEvidence & Concepts: ${rev.governing_equations_and_params || '—'}\n\nKey Findings: ${rev.key_findings || '—'}${f.user_notes ? `\n\nNotes: ${f.user_notes}` : ''}`
           : `Literature Notes — ${f.original_name}\n\n${f.user_notes || 'Added from Research Library.'}`;
-        await api('/notes', { method: 'POST', body: { body: body.slice(0, 10000) } });
-        toast('Sent to Lab Notebook');
+        await api('/notes', { method: 'POST', body: { body: body.slice(0, 10000), sourceId: f.id } });
+        toast('Sent to Research Notebook');
         await reload({ quiet: true });
       }
       return;
@@ -1107,9 +1184,10 @@ document.addEventListener('click', async e => {
       const f = state.data.files.find(x => x.id === Number(el.dataset.taskFromFile));
       if (f) {
         openTask({
-          title: `Review & verify equations from ${f.original_name}`,
+          title: `Review ${f.original_name}`,
           description: f.ai_review_data?.limitations_and_gaps || '',
-          phase: f.project_phase || 'Analytical',
+          source_ids: [f.id],
+          phase: f.project_phase || 'Literature review',
           status: 'To do',
           priority: 'Medium'
         });
