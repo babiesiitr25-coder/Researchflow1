@@ -17,7 +17,7 @@
       <div class="auth-art-content">
         <div class="eyebrow light">A BETTER WAY TO RESEARCH TOGETHER</div>
         <h1>One shared space.<br/><em>Every research breakthrough.</em></h1>
-        <p>From analytical derivations to numerical validation and manuscript submission, keep your collaboration in sync.</p>
+        <p>Bring sources, research notes and writing tasks together, from your first question to your final manuscript.</p>
         <div class="auth-art-stats"><span>01 / Plan</span><span>02 / Document</span><span>03 / Advance</span></div>
       </div>
       <div class="auth-footer">PRIVATE RESEARCH WORKSPACE · 2026</div>
@@ -30,14 +30,14 @@
   <div id="workspace" class="workspace hidden">
     <aside class="sidebar">
       <div class="sidebar-logo"><span class="brand-symbol">✣</span><span>ResearchFlow<small>RESEARCH OPERATING SYSTEM</small></span></div>
-      <div class="workspace-switch"><span class="ws-avatar">G</span><span><strong>Geotechnical Research</strong><small>Shared workspace</small></span><span class="chevron">⌄</span></div>
+      <div class="workspace-switch"><span class="ws-avatar">R</span><span><strong>Research workspace</strong><small>Shared workspace</small></span><span class="chevron">⌄</span></div>
       <div class="nav-label">WORKSPACE</div>
       <nav class="nav" id="navigation" aria-label="Primary navigation">
         <button data-page="overview" class="nav-link active"><span class="nav-symbol">▦</span> Overview</button>
         <button data-page="tasks" class="nav-link"><span class="nav-symbol">☑</span> Task board</button>
         <button data-page="agent" class="nav-link"><span class="nav-symbol">✧</span> AI research agent</button>
         <button data-page="files" class="nav-link"><span class="nav-symbol">▤</span> Research library</button>
-        <button data-page="notes" class="nav-link"><span class="nav-symbol">≡</span> Lab notebook</button>
+        <button data-page="notes" class="nav-link"><span class="nav-symbol">≡</span> Research notebook</button>
         <button data-page="activity" class="nav-link"><span class="nav-symbol">◷</span> Activity timeline</button>
       </nav>
       <div class="nav-label">PROJECT PHASES</div>
@@ -47,11 +47,12 @@
       <button id="logout" class="sidebar-account"><span id="my-avatar" class="avatar small"></span><span class="account-copy"><strong id="my-name"></strong><small id="my-role"></small></span><span class="logout-symbol" title="Sign out">⇥</span></button>
     </aside>
     <div class="app-area">
-      <header class="topbar"><div class="breadcrumb"><span>Workspace</span><span class="crumb-separator">/</span><strong id="breadcrumb-current">Overview</strong></div><div class="topbar-right"><span id="sync-status" class="sync-label"><span class="online-dot"></span> Synced</span><span class="topbar-divider"></span><span id="top-avatar" class="avatar small"></span></div></header>
+      <header class="topbar"><div class="breadcrumb"><span>Workspace</span><span class="crumb-separator">/</span><strong id="breadcrumb-current">Overview</strong></div><div class="topbar-right"><button class="button secondary small" id="open-finder">Search workspace</button><span id="sync-status" class="sync-label"><span class="online-dot"></span> Synced</span><span class="topbar-divider"></span><span id="top-avatar" class="avatar small"></span></div></header>
       <main id="content" class="content" tabindex="-1"></main>
-      <footer class="mobile-nav" id="mobile-nav"><button data-page="overview">▦<small>Home</small></button><button data-page="tasks">☑<small>Tasks</small></button><button data-page="agent">✧<small>Agent</small></button><button data-page="files">▤<small>Files</small></button><button data-page="notes">≡<small>Notes</small></button></footer>
+      <footer class="mobile-nav" id="mobile-nav"><button data-page="overview">▦<small>Home</small></button><button data-page="tasks">☑<small>Tasks</small></button><button data-page="agent">✧<small>Agent</small></button><button data-page="files">▤<small>Files</small></button><button data-page="notes">≡<small>Notes</small></button><button data-page="activity">◷<small>Activity</small></button></footer>
     </div>
   </div>
-  <dialog id="task-dialog" class="dialog"><form id="task-form" class="dialog-inner"><div class="dialog-top"><div><div class="eyebrow">PROJECT WORK</div><h2 id="task-dialog-title">New task</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></div><input type="hidden" name="id" /><label>Task title<input name="title" class="field" required maxlength="180" placeholder="e.g. Validate analytical model in Abaqus" /></label><label>Description<textarea name="description" class="field" rows="3" maxlength="5000" placeholder="Scope, assumptions, deliverables..."></textarea></label><div class="form-grid"><label>Research phase<select name="phase" class="field"><option>Analytical</option><option>Numerical</option><option>Validation</option><option>Writing</option><option>Other</option></select></label><label>Assignee<select name="assigneeId" class="field" id="task-assign"></select></label><label>Status<select name="status" class="field"><option>To do</option><option>In progress</option><option>Blocked</option><option>Done</option></select></label><label>Priority<select name="priority" class="field"><option>Low</option><option selected>Medium</option><option>High</option></select></label><label>Due date<input name="dueDate" class="field" type="date" /></label></div><div class="dialog-actions"><button type="button" class="button secondary" data-close-dialog>Cancel</button><button type="button" class="button solid" id="save-task">Save task</button></div></form></dialog>
+  <dialog id="find-records" class="dialog" aria-labelledby="find-title"><div class="dialog-inner"><div class="dialog-top"><h2 id="find-title">Search workspace</h2><form method="dialog"><button aria-label="Close search" class="icon-button">×</button></form></div><label>Search tasks, sources and notes<input id="find-query" class="field" type="search" autocomplete="off" /></label><div id="find-results" aria-live="polite"></div></div></dialog>
+  <dialog id="task-dialog" class="dialog"><form id="task-form" class="dialog-inner"><div class="dialog-top"><div><div class="eyebrow">PROJECT WORK</div><h2 id="task-dialog-title">New task</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button></div><input type="hidden" name="id" /><label>Task title<input name="title" class="field" required maxlength="180" placeholder="e.g. Compare two interpretations of a primary source" /></label><label>Description<textarea name="description" class="field" rows="3" maxlength="5000" placeholder="Scope, assumptions, deliverables..."></textarea></label><div class="form-grid"><label>Research phase<select name="phase" class="field"><option>Analytical</option><option>Numerical</option><option>Validation</option><option>Writing</option><option>Other</option></select></label><label>Assignee<select name="assigneeId" class="field" id="task-assign"></select></label><label>Status<select name="status" class="field"><option>To do</option><option>In progress</option><option>Blocked</option><option>Done</option></select></label><label>Priority<select name="priority" class="field"><option>Low</option><option selected>Medium</option><option>High</option></select></label><label>Due date<input name="dueDate" class="field" type="date" /></label></div><div class="dialog-actions"><button type="button" class="button secondary" data-close-dialog>Cancel</button><button type="button" class="button solid" id="save-task">Save task</button></div></form></dialog>
 </body>
 </html>
