@@ -288,6 +288,18 @@ CREATE TRIGGER researchflow_task_guard BEFORE INSERT OR UPDATE ON tasks FOR EACH
       await c.query("INSERT INTO schema_migrations VALUES('001-research-workspace')");
     }
   });
+  await transaction(async c=>{
+    await c.query('SELECT pg_advisory_xact_lock(723,1)');
+    if ((await c.query("SELECT 1 FROM schema_migrations WHERE name='002-notebook-links'")).rowCount) return;
+    await c.query(`ALTER TABLE notes ADD COLUMN revision integer NOT NULL DEFAULT 1;
+      CREATE TABLE note_source_links(note_id integer REFERENCES notes ON DELETE CASCADE,source_id integer REFERENCES research_files ON DELETE CASCADE,PRIMARY KEY(note_id,source_id));
+      CREATE INDEX note_source_reverse ON note_source_links(source_id,note_id);
+      CREATE TABLE note_task_links(note_id integer REFERENCES notes ON DELETE CASCADE,task_id integer REFERENCES tasks ON DELETE CASCADE,PRIMARY KEY(note_id,task_id));
+      CREATE INDEX note_task_reverse ON note_task_links(task_id,note_id);
+      INSERT INTO note_source_links SELECT id,source_id FROM notes WHERE source_id IS NOT NULL;
+      INSERT INTO note_task_links SELECT id,task_id FROM notes WHERE task_id IS NOT NULL;
+      INSERT INTO schema_migrations VALUES('002-notebook-links')`);
+  });
   const email = OWNER_EMAIL.trim().toLowerCase();
   const hash = await bcrypt.hash(OWNER_PASSWORD, 12);
   let ownerId;
@@ -727,7 +739,7 @@ app.get('/api/dashboard', required, async (req, res, next) => {
         [wsId]
       ),
       q(
-        `SELECT n.id,n.source_id,n.task_id,n.body,n.created_at,u.name AS author_name
+        `SELECT n.id,n.revision,n.source_id,n.task_id,n.body,n.created_at,u.name AS author_name,ARRAY(SELECT source_id FROM note_source_links WHERE note_id=n.id) AS source_ids,ARRAY(SELECT task_id FROM note_task_links WHERE note_id=n.id) AS task_ids
          FROM notes n LEFT JOIN users u ON u.id=n.author_id
          WHERE n.workspace_id=$1
          ORDER BY n.created_at DESC LIMIT 100`,
@@ -915,6 +927,36 @@ app.delete('/api/tasks/:id', required, async (req, res, next) => {
 });
 
 // --- Lab Notebook Routes ---
+async function saveNoteLinks(c, ws, note, body, source, task){
+  const refs = [...body.matchAll(/\[\[(cite|file|task):(\d+)\]\]/g)];
+  for(const [type,table,linkTable,key,main] of [
+    ['source','research_files','note_source_links','source_id',source],
+    ['task','tasks','note_task_links','task_id',task]
+  ]){
+    const ids=new Set(refs.filter(r=>type==='task'?r[1]==='task':r[1]!=='task').map(r=>Number(r[2])));
+    if(main) ids.add(main);
+    if(ids.size>100) throw new Error('Invalid linked record count');
+    await c.query('DELETE FROM '+linkTable+' WHERE note_id=$1',[note]);
+    for(const id of ids){
+      await checkRecord(c,table,ws,id);
+      await c.query('INSERT INTO '+linkTable+'(note_id,'+key+') VALUES($1,$2)',[note,id]);
+    }
+  }
+}
+app.patch('/api/notes/:id',required,async(req,res,next)=>{
+  try{
+    const {revision,sourceId=null,taskId=null}=req.body,body=clean(req.body.body);
+    if(!body||body.length>10000)return err(res,'Note must be 1–10000 characters');
+    await transaction(async c=>{
+      await checkRecord(c,'research_files',req.workspaceId,sourceId);
+      await checkRecord(c,'tasks',req.workspaceId,taskId);
+      const r=await c.query('UPDATE notes SET body=$1,source_id=$2,task_id=$3,revision=revision+1 WHERE id=$4 AND workspace_id=$5 AND revision=$6 RETURNING id',[body,sourceId,taskId,req.params.id,req.workspaceId,revision]);
+      if(!r.rowCount)throw Object.assign(new Error('Note changed. Your draft is still open. Reopen the current note before merging your edits.'),{status:409});
+      await saveNoteLinks(c,req.workspaceId,r.rows[0].id,body,sourceId,taskId);
+      await activity(c,req.workspaceId,req.session.userId,'Updated notebook page','note',r.rows[0].id);
+    });res.json({ok:true});
+  }catch(e){next(e);}
+});
 app.post('/api/notes', required, async (req, res, next) => {
   try {
     const body = clean(req.body.body);
@@ -928,6 +970,7 @@ app.post('/api/notes', required, async (req, res, next) => {
         'INSERT INTO notes(workspace_id,body,author_id,source_id,task_id) VALUES($1,$2,$3,$4,$5) RETURNING *',
         [wsId, body, req.session.userId, sourceId, taskId]
       );
+      await saveNoteLinks(c,wsId,r.rows[0].id,body,sourceId,taskId);
       await activity(c, wsId, req.session.userId, 'Added research note: ' + body.slice(0, 90), 'note', r.rows[0].id);
       return r.rows[0];
     });
