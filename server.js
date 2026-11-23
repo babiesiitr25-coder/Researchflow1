@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
@@ -1371,8 +1372,14 @@ Return ONLY valid JSON with these exact keys:
 
 // --- Static Frontend Serving ---
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
-app.use(express.static(publicDir, { index: false, maxAge: '15m' }));
-app.get(['/', '/invite'], (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+app.use(express.static(publicDir, { index: false, maxAge: 0, setHeaders: res => res.setHeader('Cache-Control','no-cache, must-revalidate') }));
+const assetVersion = crypto.createHash('sha256')
+  .update(readFileSync(path.join(publicDir, 'app.js')))
+  .update(readFileSync(path.join(publicDir, 'styles.css')))
+  .digest('hex').slice(0, 12);
+const entryHtml = readFileSync(path.join(publicDir, 'index.html'), 'utf8')
+  .replace(/(\/(?:app\.js|styles\.css))(?:\?v=[^"']*)?/g, '$1?v=' + assetVersion);
+app.get(['/', '/invite'], (req, res) => res.set('Cache-Control','no-cache').type('html').send(entryHtml));
 app.use('/api', (req, res) => err(res, 'Endpoint not found', 404));
 app.use((e, req, res, next) => {
   if ([400,409].includes(e.status) || /^(Invalid|Unknown teammate)/.test(e.message) || ['23514','22007','22008'].includes(e.code)) return err(res,e.message,e.status || 400);
