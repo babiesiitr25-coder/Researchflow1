@@ -216,6 +216,7 @@ function render() {
     agent: 'AI research agent',
     files: 'Research library',
     notes: 'Research notebook',
+    analysis: 'Data analysis',
     activity: 'Activity timeline',
     team: 'Team'
   };
@@ -227,10 +228,12 @@ function render() {
       agent: agentPage,
       files: filesPage,
       notes: notesPage,
+      analysis: analysisPage,
       activity: activityPage,
       team: teamPage
     }[state.page] || overviewPage
   )();
+  if(state.page==='analysis') drawAnalysis();
   if(state.workspace?.role==='viewer'){
     for(const el of $('content').querySelectorAll('[data-new-task],[data-delete-task],[data-delete-note],[data-delete-file],[data-complete],[data-member-role],[data-add-block],[data-card-status],[data-limit],[data-batch],#save-task,#confirm-actions,#browse-files,#import-reference,#note-form button[type=submit]'))el.disabled=true;
   }
@@ -1592,7 +1595,7 @@ function connectLive(){
     activeWorkspace=w; resetBoardFilters();dependencyStart=null;selectedTasks.clear(); undoStack=[];redoStack=[];state.messages=[];state.pendingActions=[];
   }
   const task=$('task-dialog').open && taskById($('task-form').elements.id.value);
-  const view=task?'Editing '+task.title:state.page==='notes'&&draftPage?.id?'Editing notebook page '+draftPage.id:({tasks:'Task board',notes:'Research notebook',files:'Research library',activity:'Activity timeline',agent:'AI agent',overview:'Overview',team:'Team'}[state.page]);
+  const view=task?'Editing '+task.title:state.page==='notes'&&draftPage?.id?'Editing notebook page '+draftPage.id:({tasks:'Task board',notes:'Research notebook',files:'Research library',analysis:'Data analysis',activity:'Activity timeline',agent:'AI agent',overview:'Overview',team:'Team'}[state.page]);
   const key=w+'|'+view;
   if(key===liveKey){showPresence(nearby);return;}
   closeLive();liveKey=key;
@@ -1783,7 +1786,7 @@ document.addEventListener('click',async e=>{
 document.addEventListener('input',e=>{
   if(e.target.id!=='find-query')return;
   const term=e.target.value.toLowerCase();
-  const commands={create:'Create a task',overview:'Overview',tasks:'Task board',files:'Research library',notes:'Research notebook',agent:'Ask the AI research agent',activity:'Activity timeline',team:'Team'};
+  const commands={create:'Create a task',overview:'Overview',tasks:'Task board',files:'Research library',notes:'Research notebook',agent:'Ask the AI research agent',analysis:'Data analysis',activity:'Activity timeline',team:'Team'};
   $('find-results').insertAdjacentHTML('afterbegin',Object.entries(commands).filter(([,v])=>v.toLowerCase().includes(term)).map(([k,v])=>'<button class="tiny-btn" data-command="'+k+'">'+v+'</button>').join(' '));
 });
 document.addEventListener('input',e=>{
@@ -1971,4 +1974,160 @@ document.head.append(boardStyles);
 const presenceLabel=document.createElement('span');
 presenceLabel.id='presence';presenceLabel.className='rf-presence';
 $('sync-status').before(presenceLabel);
+// Each workspace keeps a separate browser-session draft.
+const analysisDrafts = new Map();
+function analysisDraft() {
+  const key = JSON.stringify([state.user.id, state.workspace?.id]);
+  if (!analysisDrafts.has(key)) analysisDrafts.set(key, {
+    csv:'Load (kN),Displacement (mm)\n10,0.72\n20,1.46\n30,2.04\n40,2.93\n50,3.35\n60,4.28',
+    name:'Example · load test', x:0, y:1, type:'Scatter', title:'Load–displacement response',
+    xlabel:'', ylabel:'', color:'#176b72', font:'Arial', grid:true, fit:true
+  });
+  return analysisDrafts.get(key);
+}
+
+function analysisRows(text) {
+  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g,'\n');
+  const delim = clean.split('\n')[0].includes('\t') ? '\t' : ',';
+  const rows = [];
+  let row=[], field='', quoted=false;
+  for (let i=0; i<clean.length; i++) {
+    const c=clean[i];
+    if (c==='"') {
+      if (quoted && clean[i+1]==='"') { field+='"'; i++; }
+      else quoted=!quoted;
+    } else if (!quoted && c===delim) { row.push(field.trim()); field=''; }
+    else if (!quoted && c==='\n') { row.push(field.trim()); if(row.some(Boolean)) rows.push(row); row=[]; field=''; }
+    else field+=c;
+  }
+  if(quoted) throw Error('Close the quoted field before applying the data.');
+  row.push(field.trim()); if(row.some(Boolean)) rows.push(row);
+  const headers=rows.shift();
+  if(!headers?.length || !rows.length) throw Error('Include column headings and at least one data row.');
+  if(rows.some(r=>r.length!==headers.length)) throw Error('Check the number of fields in each row. Quote values containing commas.');
+  if(rows.length>25000) throw Error('Use up to 25,000 rows per figure.');
+  return {headers,rows};
+}
+
+function analysisModel(data,a) {
+  const numeric=v=>v!=='' && Number.isFinite(Number(v));
+  const ys=data.rows.map(r=>r[a.y]).filter(numeric).map(Number).sort((a,b)=>a-b);
+  const pairs=data.rows.filter(r=>numeric(r[a.x]) && numeric(r[a.y])).map(r=>[+r[a.x],+r[a.y]]);
+  const mean=arr=>arr.reduce((s,v)=>s+v,0)/arr.length;
+  const avg=mean(ys), quantile=p=>{
+    const pos=(ys.length-1)*p, i=Math.floor(pos);
+    return ys[i]+(pos-i)*((ys[i+1]??ys[i])-ys[i]);
+  };
+  const xm=mean(pairs.map(p=>p[0])), ym=mean(pairs.map(p=>p[1]));
+  let xx=0,xy=0,yy=0;
+  for(const [x,y] of pairs){xx+=(x-xm)**2;xy+=(x-xm)*(y-ym);yy+=(y-ym)**2;}
+  const slope=xx>0?xy/xx:NaN, intercept=ym-slope*xm;
+  const r=xx>0 && yy>0?Math.max(-1,Math.min(1,xy/Math.sqrt(xx)/Math.sqrt(yy))):NaN;
+  return {ys,pairs,slope,intercept,stats:{
+    'Valid Y values':ys.length,'Missing or nonnumeric Y':data.rows.length-ys.length,
+    'Mean':avg,'Median':quantile(.5),'Sample SD':ys.length>1?Math.sqrt(ys.reduce((s,y)=>s+(y-avg)**2,0)/(ys.length-1)):NaN,
+    'Minimum':ys[0],'Maximum':ys.at(-1),'First quartile':quantile(.25),'Third quartile':quantile(.75),
+    'Valid X–Y pairs':pairs.length,'Pearson r':r,'OLS slope':slope,'OLS intercept':intercept,'R²':r*r
+  }};
+}
+const analysisNumber=n=>Number.isFinite(n)?String(Number(n.toPrecision(5))):'—';
+
+function analysisFigure(a,data,m) {
+  const hist=a.type==='Histogram';
+  let points=hist?m.ys.map(y=>[y,0]):m.pairs;
+  if(!points.length) return '<p>No numeric observations for these columns.</p>';
+  let xs=points.map(p=>p[0]), ys=points.map(p=>p[1]);
+  let xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(...ys), ymax=Math.max(...ys);
+  if(xmax===xmin){const pad=Math.abs(xmin)*.05||.5;xmin-=pad;xmax+=pad;}
+  let bars=[];
+  if(hist){
+    const bins=Math.min(50,Math.ceil(Math.sqrt(xs.length)));
+    bars=Array(bins).fill(0);
+    xs.forEach(x=>bars[Math.min(bins-1,Math.floor((x-xmin)/(xmax-xmin)*bins))]++);
+    ymin=0; ymax=Math.max(...bars);
+  }
+  if(ymax===ymin){const pad=Math.abs(ymin)*.05||.5;ymin-=pad;ymax+=pad;}
+  if(!hist){const pad=(ymax-ymin)*.06; ymin-=pad; ymax+=pad;}
+  const X=x=>100+590*(x-xmin)/(xmax-xmin), Y=y=>325-245*(y-ymin)/(ymax-ymin);
+  const label=(x,y,s,attrs='')=>'<text x="'+x+'" y="'+y+'" text-anchor="middle" '+attrs+'>'+esc(s)+'</text>';
+  const line=(x1,y1,x2,y2,color,extra='')=>'<line x1="'+x1+'" x2="'+x2+'" y1="'+y1+'" y2="'+y2+'" stroke="'+color+'" '+extra+'/>';
+  let marks='';
+  for(let i=0;i<=5;i++){
+    const t=i/5, x=100+590*t,y=325-245*t;
+    if(a.grid) marks+=line(100,y,690,y,'#dce4e4');
+    marks+=label(x,347,analysisNumber(xmin+t*(xmax-xmin)))+
+      '<text x="89" y="'+(y+4)+'" text-anchor="end">'+analysisNumber(ymin+t*(ymax-ymin))+'</text>';
+  }
+  marks+=line(100,325,690,325,'#657879')+line(100,80,100,325,'#657879');
+  if(hist) bars.forEach((n,i)=>{const w=590/bars.length;marks+='<rect x="'+(100+i*w)+'" y="'+Y(n)+'" width="'+(w-.8)+'" height="'+(325-Y(n))+'" fill="'+a.color+'"><title>'+n+' observations</title></rect>';});
+  else {
+    if(a.type==='Line') marks+='<polyline fill="none" stroke="'+a.color+'" stroke-width="2" points="'+points.map(([x,y])=>X(x)+','+Y(y)).join(' ')+'"/>';
+    if(a.fit && Number.isFinite(m.slope)) marks+=line(100,Y(m.slope*xmin+m.intercept),690,Y(m.slope*xmax+m.intercept),'#a25c30','clip-path="url(#rf-plot-area)" stroke-width="2" stroke-dasharray="7 5"');
+    marks+=points.map(([x,y])=>'<circle cx="'+X(x)+'" cy="'+Y(y)+'" r="3.4" fill="'+a.color+'"><title>'+x+', '+y+'</title></circle>').join('');
+  }
+  return '<svg id="analysis-svg" xmlns="http://www.w3.org/2000/svg" width="740" height="422" viewBox="0 0 740 422" role="img" aria-label="'+esc(a.title||'Data figure')+'" font-family="'+a.font+'" font-size="12" fill="#253638"><rect width="740" height="422" fill="white"/><defs><clipPath id="rf-plot-area"><rect x="100" y="80" width="590" height="245"/></clipPath></defs>'+
+    label(370,34,a.title,'font-size="21" font-weight="600"')+marks+
+    label(395,379,a.xlabel||data.headers[hist?a.y:a.x],'font-size="15"')+
+    label(0,0,a.ylabel||(hist?'Frequency':data.headers[a.y]),'transform="translate(24 202) rotate(-90)" font-size="15"')+
+    label(395,406,(hist?xs.length+' observations':points.length+' paired observations')+(!hist && a.fit && Number.isFinite(m.slope)?'   ·   Dashed line: ordinary least squares':''),'fill="#55686a"')+'</svg>';
+}
+
+function analysisPage() {
+  const a=analysisDraft(),data=analysisRows(a.csv);
+  const select=(key,caption,choices)=>'<label>'+caption+'<select class="field" data-analysis="'+key+'">'+choices.map(([v,t])=>'<option value="'+esc(v)+'" '+(String(v)===String(a[key])?'selected':'')+'>'+esc(t)+'</option>').join('')+'</select></label>';
+  const input=(key,caption,type='text')=>'<label>'+caption+'<input class="field" type="'+type+'" data-analysis="'+key+'" value="'+esc(a[key])+'" maxlength="120"></label>';
+  const check=(key,caption)=>'<label><input type="checkbox" data-analysis="'+key+'" '+(a[key]?'checked':'')+'> '+caption+'</label>';
+  const columns=data.headers.map((name,i)=>[i,name||'Column '+(i+1)]);
+  const choices=arr=>arr.map(v=>[v,v]);
+  return pageHeading('RESEARCH METHODS','Data analysis','Explore a dataset, inspect the calculations and prepare a figure.')+
+    '<div id="analysis-lab"><section class="card panel"><h2>Dataset</h2><p>'+esc(a.name)+' · '+data.rows.length+' rows · '+data.headers.length+' columns</p><label>Import CSV or TSV <input id="analysis-file" type="file" accept=".csv,.tsv,.txt"></label><details><summary>Paste or edit data</summary><label>Delimited data with column headings<textarea class="field" id="analysis-data" rows="7">'+esc(a.pending??a.csv)+'</textarea></label><button class="button secondary" id="analysis-apply">Apply data</button></details></section>'+
+    '<div class="analysis-layout"><section class="card panel analysis-controls"><h2>Figure settings</h2>'+
+    select('type','Chart type',choices(['Scatter','Line','Histogram']))+select('x','X column',columns)+select('y','Y column · histogram variable',columns)+input('title','Figure title')+input('xlabel','Horizontal axis label')+input('ylabel','Vertical axis label')+input('color','Series colour','color')+select('font','Typeface',choices(['Arial','Georgia','Verdana']))+check('grid','Horizontal gridlines')+check('fit','Linear fit on paired charts')+'</section>'+
+    '<section class="card panel"><h2>Figure preview</h2><div id="analysis-figure"></div><button class="button secondary" id="analysis-export">Download editable SVG</button><p class="small-text muted">SVG preserves text and shapes for editing in a vector editor.</p></section></div><section class="card panel"><h2>Statistical summary</h2><div id="analysis-stats"></div></section></div>';
+}
+function drawAnalysis(){
+  const a=analysisDraft(),data=analysisRows(a.csv),model=analysisModel(data,a);
+  $('analysis-figure').innerHTML=analysisFigure(a,data,model);
+  $('analysis-export').disabled=!$('analysis-svg');
+  $('analysis-stats').innerHTML=Object.entries(model.stats).map(([key,v])=>'<div><small>'+key+'</small><strong>'+analysisNumber(v)+'</strong></div>').join('');
+}
+function applyAnalysis(text,name) {
+  const data=analysisRows(text),a=analysisDraft();
+  Object.assign(a,{csv:text,name,x:0,y:Math.min(1,data.headers.length-1),title:name,xlabel:'',ylabel:''});
+  delete a.pending;render();
+}
+document.addEventListener('input',e=>{
+  if(e.target.id==='analysis-data') analysisDraft().pending=e.target.value;
+  const key=e.target.dataset.analysis;
+  if(!key)return;
+  analysisDraft()[key]=e.target.type==='checkbox'?e.target.checked:e.target.value;
+  drawAnalysis();
+});
+document.addEventListener('change',async e=>{
+  if(e.target.id!=='analysis-file') return;
+  const file=e.target.files[0],draft=analysisDraft();
+  if(!file)return;
+  try{
+    if(file.size>5*1024*1024)throw Error('Choose a file under 5 MiB.');
+    const content=await file.text();
+    if(state.page==='analysis' && analysisDraft()===draft) applyAnalysis(content,file.name);
+  }catch(err){toast(err.message,true);}
+});
+document.addEventListener('click',e=>{
+  if(e.target.id==='analysis-apply'){
+    try{applyAnalysis($('analysis-data').value,'Edited dataset');}catch(err){toast(err.message,true);}
+  }
+  if(e.target.id==='analysis-export'){
+    const svg=$('analysis-svg'); if(!svg)return;
+    const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml'}));
+    const link=document.createElement('a');link.href=url;link.download='research-figure.svg';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+});
+const analysisStyle=document.createElement('style');
+analysisStyle.textContent='#analysis-lab{display:grid;gap:16px}#analysis-lab h2{font-size:18px;margin:0 0 15px}.analysis-layout{display:grid;grid-template-columns:minmax(200px,1fr) minmax(0,3fr);gap:16px;align-items:start}.analysis-controls{display:grid;gap:10px}#analysis-lab label{font-size:13px;font-weight:550}#analysis-lab .field{display:block;width:100%;margin-top:4px}#analysis-lab details{margin-top:14px}#analysis-lab summary{cursor:pointer;margin-bottom:8px}#analysis-svg{width:100%;height:auto}#analysis-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px}#analysis-stats strong{display:block;font-size:19px;font-variant-numeric:tabular-nums}@media(max-width:850px){.analysis-layout{grid-template-columns:1fr}.analysis-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.analysis-controls h2{grid-column:1/-1}}';
+document.head.append(analysisStyle);
+for(const sibling of document.querySelectorAll('button[data-page="activity"]')){
+  const tab=sibling.cloneNode(false);tab.dataset.page='analysis';tab.innerHTML='<span aria-hidden="true">∿</span> Data analysis';sibling.before(tab);
+}
+
 boot();
