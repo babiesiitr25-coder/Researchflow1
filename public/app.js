@@ -2208,7 +2208,7 @@ function labFigure(a,m){
     const s=+step,start=Math.ceil(l/s)*s;if(!(s>0)||((h-start)/s)>100)throw Error('Choose a positive tick interval producing at most 100 ticks.');
     return Array.from({length:Math.max(0,Math.floor((h-start)/s+1e-9)+1)},(_,i)=>un(start+i*s));
   };
-  let content=txt(W/2,fs*1.85,a.title,'text-anchor="middle" font-weight="bold" font-size="'+fs*1.25+'"');
+  let content=txt(W/2,fs*1.85,a.title,'data-axis-edit="title" text-anchor="middle" font-weight="bold" font-size="'+fs*1.25+'"');
   for(const y of ticks(y0,y1,a.ytick,uy)){const py=Y(y);if(a.grid)content+=line(left,py,right,py,'stroke="#dce4e4"');content+=txt(left-6,py+fs*.32,labFmt(y),'text-anchor="end"');}
   for(const x of cat?Array.from({length:ncat},(_,i)=>i):ticks(x0,x1,a.xtick,ux)){
     const px=X(x),py=bottom+fs*1.2,label=cat?m.labels[x]:labFmt(x);
@@ -2227,11 +2227,11 @@ function labFigure(a,m){
       else {if(st.geometry!=='Line only'||cat)ink+=mark(px,py,st);if(s.kind==='mean'&&Number.isFinite(s.error)&&(!logY||y-s.error>0)){const y1=Y(y-s.error),y2=Y(y+s.error),attr='stroke="'+st.color+'"';ink+=line(px,y1,px,y2,attr)+line(px-4,y1,px+4,y1,attr)+line(px-4,y2,px+4,y2,attr);}}
     }
     const lx=left+(i%3)*(right-left)/3,ly=H-fs*(.8+1.5*(Math.ceil(m.series.length/3)-1-Math.floor(i/3)));
-    content+=line(lx,ly-3,lx+18,ly-3,'stroke="'+st.color+'" stroke-width="'+st.weight+'" stroke-dasharray="'+dash[st.dash]+'"')+mark(lx+9,ly-3,st)+txt(lx+22,ly,st.label);
+    content+=line(lx,ly-3,lx+18,ly-3,'stroke="'+st.color+'" stroke-width="'+st.weight+'" stroke-dasharray="'+dash[st.dash]+'"')+mark(lx+9,ly-3,st)+txt(lx+22,ly,st.label,'data-legend-edit="'+esc(s.key)+'"');
   });
   const axis=(s,col)=>s+(a.units[col]?' ('+a.units[col]+')':'');
-  content+=txt((left+right)/2,bottom+fs*(cat?5.9:3.2),a.xlabel||axis(m.xname||'',a.mode===labModes[4]?a.y:a.x),'text-anchor="middle"')+
-    txt(0,0,a.ylabel||(cat&&a.mode!==labModes[2]?m.yname:axis(m.yname||'',a.y)),'transform="translate('+fs+' '+((top+bottom)/2)+') rotate(-90)" text-anchor="middle"');
+  content+=txt((left+right)/2,bottom+fs*(cat?5.9:3.2),a.xlabel||axis(m.xname||'',a.mode===labModes[4]?a.y:a.x),'data-axis-edit="xlabel" text-anchor="middle"')+
+    txt(0,0,a.ylabel||(cat&&a.mode!==labModes[2]?m.yname:axis(m.yname||'',a.y)),'data-axis-edit="ylabel" transform="translate('+fs+' '+((top+bottom)/2)+') rotate(-90)" text-anchor="middle"');
   return '<svg id="analysis-svg" role="img" aria-label="'+esc(a.title)+'" xmlns="http://www.w3.org/2000/svg" width="'+a.width+'mm" height="'+a.height+'mm" viewBox="0 0 '+W+' '+H+'" font-family="'+esc(a.font)+'" font-size="'+fs+'" fill="#273738"><rect width="100%" height="100%" fill="white"/><defs><clipPath id="lab-clip"><rect x="'+left+'" y="'+top+'" width="'+(right-left)+'" height="'+(bottom-top)+'"/></clipPath></defs>'+content+'<g clip-path="url(#lab-clip)">'+ink+'</g></svg>';
 }
 function labOptions(items,current){
@@ -2271,23 +2271,23 @@ function analysisPage(){
   const files=state.data.files, saved=files.filter(labSaved),source=files.filter(labSource),write=state.workspace?.role!=='viewer',human=a.mode===labModes[5],trend=a.mode===labModes[0];
   const uniqueGroups=+a.group>=0?[...new Set(d.rows.map(r=>r[a.group]).filter(Boolean))]:[];
   return pageHeading('RESEARCH METHODS','Data analysis','Prepare a dataset, compare evidence, and save reproducible figures.')+
-    '<div id="analysis-lab"><section class="card panel"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+
+    '<div id="analysis-lab" class="lab-editor" data-pane="'+(labPanes.get(a)||'Figure')+'"><nav aria-label="Analysis panels" class="lab-tabs">'+['Data','Figure','Results'].map(v=>'<button class="tiny-btn" data-pane-choice="'+v+'">'+v+'</button>').join('')+'</nav><section class="card panel lab-data"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+
     '</div><div class="rf-tools"><button class="tiny-btn" data-start="open">Change dataset</button><button class="tiny-btn" data-start="resume">Open saved version</button>'+(write?button('save','Save version'):'')+button('duplicate','Duplicate analysis')+
     (a.sourceId?'<button class="tiny-btn" data-preview="'+Number(a.sourceId)+'">View source record</button>':'')+'</div><details><summary>Paste or edit data</summary><textarea id="lab-csv" class="field" rows="6" aria-label="Delimited dataset">'+esc(a.pending??a.csv)+'</textarea>'+button('apply','Apply data')+'</details>'+
     (labWorkbook?.owner===a?'<div class="lab-fields"><label>Excel sheet<select id="lab-sheet" class="field">'+labOptions(labWorkbook.sheets.map((s,i)=>[i,s.name]),labWorkbook.index)+'</select></label><label>Header row<input class="field" id="lab-header" type="number" min="1" value="'+labWorkbook.header+'"></label>'+button('sheet','Use sheet and header')+'</div>':'')+
-    '</section><details class="card panel"><summary>Data preview and quality checks</summary><div id="lab-quality"></div></details>'+
-    '<section class="card panel"><h2>Research question</h2><div class="lab-fields">'+select('mode','Analysis',labModes)+
+    '</section><details class="card panel lab-quality"><summary>Data preview and quality checks</summary><div id="lab-quality"></div></details>'+
+    '<section class="card panel lab-question"><h2>Research question</h2><div class="lab-fields">'+select('mode','Analysis',labModes)+
     (trend?select('method','Regression model',labMethods)+select('type','Display',['Scatter','Line','Residuals']):'')+
     (human?select('category','Coded category',cols)+select('frequency','Frequency measure',['Counts','Within-group %','Per 10,000 words'])+(a.frequency==='Per 10,000 words'?select('word','Word total column',[[-1,'Select word totals'],...cols]):''):
     (![labModes[2],labModes[4]].includes(a.mode)?select('x',a.mode===labModes[1]?'Measured column':'X column',cols):'')+select('y',a.mode===labModes[1]?'Predicted column':'Response / Y column',cols))+
     select('group',human?'Text or comparison group':'Group series by',[[-1,'All rows'],...cols])+
     (a.mode===labModes[2]?select('error','Error bars',['95% CI','SD','SE'])+(uniqueGroups.length>1?select('groupA','First group',[['','First available'],...uniqueGroups])+select('groupB','Second group',[['','Second available'],...uniqueGroups]):''):'')+'</div>'+
     (trend?'<details><summary>Additional Y series</summary>'+cols.filter(([i])=>i!==+a.y).map(([i,h])=>'<label class="lab-inline"><input type="checkbox" data-lab-more="'+i+'" '+(a.more.includes(i)?'checked':'')+'> '+esc(h)+'</label>').join('')+'</details>':'')+'</section>'+
-    '<section class="card panel"><h2>Figure</h2><div id="lab-plot"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
-    '<details class="card panel"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
+    '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
+    '<details class="card panel lab-settings"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
     ['xmin','xmax','ymin','ymax','xtick','ytick'].map((k,i)=>input(k,['X minimum','X maximum','Y minimum','Y maximum','X tick interval','Y tick interval'][i],'number','step="any" placeholder="Automatic"')).join('')+check('logx','Log X')+check('logy','Log Y')+check('gray','Grayscale')+check('grid','Gridlines')+(trend?check('fit','Show fitted curves'):'')+'</div><p class="small-text">Log tick intervals are in powers of ten. Category axes use the dataset order.</p><div id="lab-styles"></div></details>'+
-    '<section class="card panel"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-results"></div></section>'+
-    (write?'<section class="card panel"><h2>Research notebook</h2>'+input('caption','Figure caption')+button('notebook','Save figure and results to notebook')+'</section>':'')+'</div>';
+    '<section class="card panel lab-output"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-results"></div></section>'+
+    (write?'<section class="card panel lab-notebook"><h2>Research notebook</h2>'+input('caption','Figure caption')+button('notebook','Save figure and results to notebook')+'</section>':'')+'</div>';
 }
 function labQuality(a,d,m){
   const found=new Set();let dup=0;for(const r of d.rows){const k=JSON.stringify(r);if(found.has(k))dup++;found.add(k);}
@@ -2300,6 +2300,8 @@ function drawAnalysis(){
   if(!$('lab-plot'))return;
   const a=analysisDraft(),d=analysisRows(a.csv),m=labCompute(a,d);
   try{$('lab-plot').innerHTML=labFigure(a,m);}catch(e){$('lab-plot').textContent=e.message;}
+  labChoosePane(labPanes.get(a)||'Figure');
+  $('lab-plot').querySelectorAll('[data-axis-edit],[data-legend-edit]').forEach(t=>{t.setAttribute('tabindex','0');t.setAttribute('role','button');t.setAttribute('aria-label','Edit '+(t.dataset.axisEdit||'legend')+' · '+t.textContent);});
   $('lab-method').textContent=m.message+(m.labels.length>30?' Figure displays the first 30 categories. All categories are in the results export.':'')+(a.logx||a.logy?' Log axes display positive values only.':'');
   $('lab-results').innerHTML=labTable(['Series / group','Measure','Result'],m.results.slice(0,250))+(m.results.length>250?'<p>First 250 entries shown. Download the full table above.</p>':'');
   $('lab-quality').innerHTML=labQuality(a,d,m);
@@ -2490,4 +2492,25 @@ for(const sibling of document.querySelectorAll('button[data-page="activity"]')){
  const tab=sibling.cloneNode(false);tab.dataset.page='analysis';tab.innerHTML='<span aria-hidden="true">∿</span> Data analysis';sibling.before(tab);
 }
 
+const labPanes=new WeakMap();
+function labChoosePane(pane){
+  const root=$('analysis-lab');if(!root)return;
+  labPanes.set(analysisDraft(),pane);root.dataset.pane=pane;
+  root.querySelectorAll('[data-pane-choice]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.paneChoice===pane)));
+}
+function labEditLabel(el){
+  const root=$('analysis-lab'),panel=root.querySelector('.lab-settings');labChoosePane('Figure');panel.open=true;
+  const field=el.hasAttribute('data-axis-edit')?panel.querySelector('[data-lab="'+el.dataset.axisEdit+'"]'):[...panel.querySelectorAll('[data-style="label"]')].find(f=>f.dataset.series===el.dataset.legendEdit);
+  if(field){field.focus();field.select();field.scrollIntoView({block:'nearest'});}
+}
+document.addEventListener('click',e=>{
+  const tab=e.target.closest('[data-pane-choice]');if(tab)labChoosePane(tab.dataset.paneChoice);
+  const text=e.target.closest('#lab-plot [data-axis-edit],#lab-plot [data-legend-edit]');if(text)labEditLabel(text);
+});
+document.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)&&e.target.matches('#lab-plot [data-axis-edit],#lab-plot [data-legend-edit]')){e.preventDefault();labEditLabel(e.target);}});
+analysisStyle.textContent+=`
+#analysis-lab.lab-editor{grid-template-columns:minmax(195px,0.8fr) minmax(0,2fr);align-items:start;grid-template-areas:"data data" "quality quality" "question chart" "settings output" "note note"}
+.lab-data{grid-area:data}.lab-quality{grid-area:quality}.lab-question{grid-area:question}.lab-chart{grid-area:chart}.lab-settings{grid-area:settings}.lab-output{grid-area:output}.lab-notebook{grid-area:note}.lab-tabs{display:none}
+#lab-plot [data-axis-edit],#lab-plot [data-legend-edit]{cursor:text}#lab-plot text:focus{outline:2px solid #167478}
+@media(max-width:850px){#analysis-lab.lab-editor{display:flex;flex-direction:column;align-items:stretch}.lab-editor .lab-tabs{display:flex;gap:6px;position:sticky;top:0;background:white;padding:8px;z-index:2}.lab-tabs [aria-pressed=true]{background:#244d47;color:white}.lab-editor[data-pane]>.card{display:none}.lab-editor[data-pane=Data]>.lab-data,.lab-editor[data-pane=Data]>.lab-quality,.lab-editor[data-pane=Figure]>.lab-question,.lab-editor[data-pane=Figure]>.lab-chart,.lab-editor[data-pane=Figure]>.lab-settings,.lab-editor[data-pane=Results]>.lab-output,.lab-editor[data-pane=Results]>.lab-notebook{display:block}}`;
 boot();
