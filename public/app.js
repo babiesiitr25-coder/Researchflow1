@@ -2091,7 +2091,7 @@ function labRegression(points,method){
   return {p,predict,residual,stats};
 }
 function labCompute(a,d){
-  const info={series:[],results:[],issues:[],message:'',categorical:false,labels:[],xname:d.headers[a.x],yname:d.headers[a.y]};
+  const info={used:new Set(),series:[],results:[],issues:[],message:'',categorical:false,labels:[],xname:d.headers[a.x],yname:d.headers[a.y]};
   const numeric=(row,c)=>{if(a.types[c]==='Text')return NaN;const s=String(row[c]??'').trim();return labNum(a.types[c]==='Number (grouped)'&&/^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)?s.replaceAll(',',''):s);};
   const add=(key,rows)=>info.results.push(...rows.map(([metric,value])=>[key,metric,value]));
   const issue=(i,s)=>info.issues.push([i+2,s]);
@@ -2104,6 +2104,9 @@ function labCompute(a,d){
       if(!counts.has(g))counts.set(g,new Map());
       cats.add(c);const m=counts.get(g);m.set(c,(m.get(c)||0)+1);totals.set(g,(totals.get(g)||0)+1);
       if(a.frequency==='Per 10,000 words'){const w=numeric(r,a.word);if(!(w>0)||denoms.has(g)&&denoms.get(g)!==w){invalid.add(g);issue(i,'Invalid or inconsistent word total for this group');}denoms.set(g,w);}
+    });
+    d.rows.forEach((r,i)=>{const g=+a.group>=0?r[a.group]:'Corpus';if(!g||!r[a.category])return;
+      if(invalid.has(g))issue(i,'Word rate unavailable for this text: check its repeated word total');else info.used.add(i);
     });
     info.labels=[...cats];for(const [g,m] of counts){
       const den=a.frequency==='Per 10,000 words'?denoms.get(g):totals.get(g);
@@ -2123,6 +2126,7 @@ function labCompute(a,d){
       const y=numeric(r,j),needsX=![labModes[2],labModes[4]].includes(a.mode);
       if(!Number.isFinite(y)||needsX&&!Number.isFinite(x)){issue(i,'Missing or nonnumeric '+(!Number.isFinite(y)?d.headers[j]:d.headers[a.x]));continue;}
       const key=g?(measurements.length>1?g+' · '+d.headers[j]:g):d.headers[j];
+      if(a.mode!==labModes[0])info.used.add(i);
       if(!groups.has(key))groups.set(key,[]);groups.get(key).push([x,y,i]);
     }
   });
@@ -2156,10 +2160,10 @@ function labCompute(a,d){
     const series={key,points:p,kind:a.type};info.series.push(series);
     try{
       const model=labRegression(p,a.method);add(key,model.stats);
-      const eligible=new Set(model.p);p.forEach(t=>{if(!eligible.has(t))issue(t[2],'Outside '+a.method+' model domain');});
+      model.p.forEach(t=>info.used.add(t[2]));const eligible=new Set(model.p);p.forEach(t=>{if(!eligible.has(t))issue(t[2],'Outside '+a.method+' model domain');});
       if(a.type==='Residuals'){series.points=model.residual;info.yname='Residual (observed − fitted)';}
       else if(a.fit){const xs=model.p.map(t=>t[0]),lo=Math.min(...xs),hi=Math.max(...xs);series.curve=Array.from({length:101},(_,i)=>{const x=lo+(hi-lo)*i/100;return [x,model.predict(x)];});}
-    }catch(e){add(key,[['Model unavailable',e.message]]);if(a.type==='Residuals')series.points=[];}
+    }catch(e){p.forEach(t=>issue(t[2],key+': '+e.message));add(key,[['Model unavailable',e.message]]);if(a.type==='Residuals')series.points=[];}
     info.message='Coefficients include pointwise 95% t intervals when residual degrees of freedom permit. Inference assumes independent errors with constant variance and approximate normality on the fitted scale. '+({Exponential:'Model: ln(Y) = b₀ + b₁X; Y must be positive.',Power:'Model: ln(Y) = b₀ + b₁ln(X); both variables must be positive.',Logarithmic:'Model: Y = b₀ + b₁ln(X); X must be positive.'}[a.method]||'Polynomial terms use the original X units.');
   }
   if(a.mode===labModes[2]){
@@ -2321,7 +2325,7 @@ function analysisPage(){
     select('group',human?'Text':'Group series by',[[-1,'All rows'],...cols])+
     (a.mode===labModes[2]?select('error','Error bars',['95% CI','SD','SE'])+(uniqueGroups.length>1?select('groupA','First group',[['','First available'],...uniqueGroups])+select('groupB','Second group',[['','Second available'],...uniqueGroups]):''):'')+'</div>'+
     '<p class="small-text">'+esc(guidance)+'</p>'+(trend?'<details><summary>Additional Y series</summary>'+cols.filter(([i])=>i!==+a.y).map(([i,h])=>'<label class="lab-inline"><input type="checkbox" data-lab-more="'+i+'" '+(a.more.includes(i)?'checked':'')+'> '+esc(h)+'</label>').join('')+'</details>':'')+'</section>'+
-    '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
+    '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div id="lab-coverage" class="small-text"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
     '<details class="card panel lab-settings"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
     ['xmin','xmax','ymin','ymax','xtick','ytick'].map((k,i)=>input(k,['X minimum','X maximum','Y minimum','Y maximum','X tick interval','Y tick interval'][i],'number','step="any" placeholder="Automatic"')).join('')+check('logx','Log X')+check('logy','Log Y')+check('gray','Grayscale')+check('grid','Gridlines')+(trend?check('fit','Show fitted curves'):'')+'</div><p class="small-text">Log tick intervals are in powers of ten. Category axes use the dataset order.</p><div id="lab-styles"></div></details>'+
     '<section class="card panel lab-output"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-results"></div></section>'+
@@ -2330,9 +2334,9 @@ function analysisPage(){
 function labQuality(a,d,m){
   const found=new Set();let dup=0;for(const r of d.rows){const k=JSON.stringify(r);if(found.has(k))dup++;found.add(k);}
   const types=['Auto','Numeric','Number (grouped)','Text'];
-  return '<p>'+dup+' repeated rows (retained) · '+new Set(m.issues.map(i=>i[0])).size+' rows flagged for the selected analysis.</p><div class="lab-scroll"><table class="task-table"><tr><th>Column</th><th>Detected</th><th>Blank</th><th>Interpret as</th><th>Unit</th></tr>'+d.headers.map((h,i)=>{
+  return '<p>'+dup+' repeated rows (retained)'+(a.mode===labModes[5]?' · Identical text–theme entries may represent separate coded occurrences.':'')+' · '+new Set(m.issues.map(i=>i[0])).size+' rows flagged for the selected analysis.</p><div class="lab-scroll"><table class="task-table"><tr><th>Column</th><th>Detected</th><th>Blank</th><th>Interpret as</th><th>Unit</th></tr>'+d.headers.map((h,i)=>{
     const filled=d.rows.map(r=>r[i]).filter(Boolean),n=filled.filter(s=>Number.isFinite(labNum(s))).length;
-    return '<tr><td>'+esc(h)+'</td><td>'+(n===0?'Text':n===filled.length?'Numeric':'Mixed')+'</td><td>'+(d.rows.length-filled.length)+'</td><td><select data-lab-type="'+i+'" aria-label="Type for '+esc(h)+'">'+labOptions(types,a.types[i]||'Auto')+'</select></td><td><input data-lab-unit="'+i+'" aria-label="Units for '+esc(h)+'" value="'+esc(a.units[i]||'')+'"></td></tr>';}).join('')+'</table></div><h3>First '+Math.min(20,d.rows.length)+' rows</h3>'+labTable(d.headers,d.rows.slice(0,20))+(m.issues.length?'<h3>Flagged rows</h3>'+labTable(['Spreadsheet row','Reason'],m.issues.slice(0,100))+(m.issues.length>100?'<button class="tiny-btn" data-lab-action="issues">Download all flagged rows</button>':''):'');
+    return '<tr><td>'+esc(h)+'</td><td>'+(n===0?'Text':n===filled.length?'Numeric':'Mixed')+'</td><td>'+(d.rows.length-filled.length)+'</td><td><select data-lab-type="'+i+'" aria-label="Type for '+esc(h)+'">'+labOptions(types,a.types[i]||'Auto')+'</select></td><td><input data-lab-unit="'+i+'" aria-label="Units for '+esc(h)+'" value="'+esc(a.units[i]||'')+'"></td></tr>';}).join('')+'</table></div><h3>First '+Math.min(20,d.rows.length)+' rows</h3>'+labTable(d.headers,d.rows.slice(0,20))+(m.issues.length?'<h3 tabindex="-1" id="lab-flagged">Flagged rows</h3>'+labTable(['Spreadsheet row','Reason',...d.headers],m.issues.slice(0,100).map(([n,why])=>[n,why,...d.rows[n-2]]))+(m.issues.length>100?'<button class="tiny-btn" data-lab-action="issues">Download all flagged rows</button>':''):'');
 }
 function drawAnalysis(){
   if(!$('lab-plot'))return;
@@ -2342,6 +2346,9 @@ function drawAnalysis(){
   $('lab-plot').querySelectorAll('[data-axis-edit],[data-legend-edit]').forEach(t=>{t.setAttribute('tabindex','0');t.setAttribute('role','button');t.setAttribute('aria-label','Edit '+(t.dataset.axisEdit||'legend')+' · '+t.textContent);});
   $('lab-method').textContent=m.message+(m.labels.length>30?' Figure displays the first 30 categories. All categories are in the results export.':'')+(a.logx||a.logy?' Log axes display positive values only.':'');
   $('lab-results').innerHTML=labTable(['Series / group','Measure','Result'],m.results.slice(0,250))+(m.results.length>250?'<p>First 250 entries shown. Download the full table above.</p>':'');
+  const excluded=d.rows.length-m.used.size;
+  const warnings=new Set(m.issues.map(r=>r[0]));
+  $('lab-coverage').innerHTML=m.used.size+' of '+d.rows.length+' rows used in '+(a.mode===labModes[0]?'fitted models':'the analysis')+' · '+excluded+' fully excluded'+(warnings.size?' · <button class="text-link" data-review-rows>Review '+warnings.size+' flagged '+(warnings.size===1?'row':'rows')+'</button>':'');
   $('lab-quality').innerHTML=labQuality(a,d,m);
   $('lab-styles').innerHTML=m.series.slice(0,60).map((s,i)=>{const st=labStyle(a,s.key,i),attr=' data-series="'+esc(s.key)+'" ';return '<fieldset><legend>'+esc(s.key)+'</legend><div class="lab-fields"><label>Legend label<input class="field"'+attr+'data-style="label" value="'+esc(st.label)+'"></label><label>Colour<input type="color"'+attr+'data-style="color" value="'+st.color+'"></label><label>Series display<select'+attr+'data-style="geometry">'+labOptions(['Use chart setting','Markers only','Line only','Line and markers'],st.geometry)+'</select></label><label>Stroke<select'+attr+'data-style="dash">'+labOptions(['Solid','Dashed','Dotted'],st.dash)+'</select></label><label>Marker<select'+attr+'data-style="marker">'+labOptions(['Circle','Square','Triangle','Diamond','None'],st.marker)+'</select></label><label>Line width<input type="number" min=".4" max="6" step=".2"'+attr+'data-style="weight" value="'+st.weight+'"></label></div></fieldset>';}).join('');
 }
@@ -2543,6 +2550,7 @@ function labEditLabel(el){
   if(field){field.focus();field.select();field.scrollIntoView({block:'nearest'});}
 }
 document.addEventListener('click',e=>{
+  if(e.target.closest('[data-review-rows]')){labChoosePane('Data');document.querySelector('.lab-quality').open=true;$('lab-flagged')?.focus();}
   const tab=e.target.closest('[data-pane-choice]');if(tab)labChoosePane(tab.dataset.paneChoice);
   const text=e.target.closest('#lab-plot [data-axis-edit],#lab-plot [data-legend-edit]');if(text)labEditLabel(text);
 });
