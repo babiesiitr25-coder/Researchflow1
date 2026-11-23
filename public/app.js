@@ -384,6 +384,7 @@ function renderFileListOrMatrix(files) {
           <th>Objective & Methodology</th>
           <th>Evidence & Concepts</th>
           <th>Key Findings & Gaps</th>
+          ${dimensions().map(k=>'<th>'+esc(k)+'</th>').join('')}
           <th>Actions</th>
         </tr>
       </thead>
@@ -429,8 +430,10 @@ function renderFileListOrMatrix(files) {
                     : '<span class="muted">—</span>'
                 }
               </td>
+              ${dimensions().map(k=>'<td><button class="text-link" data-dimension="'+f.id+'" data-key="'+esc(k)+'">'+esc(cit.dimensions?.[k]||'Add value')+'</button></td>').join('')}
               <td>
                 <div class="inline-actions" style="flex-wrap:wrap">
+                  <button class="tiny-btn" data-new-dimension="${f.id}">Add dimension</button>
                   <button class="tiny-btn" data-open-review="${f.id}">${rev ? '✧ Review' : '✧ Analyze'}</button>
                   <button class="tiny-btn" data-copy-bibtex="${f.id}" title="Copy BibTeX">📋 BibTeX</button>
                   <button class="tiny-btn" data-download="${f.id}" title="Download">↓</button>
@@ -503,7 +506,8 @@ function renderActiveReviewDrawer() {
   const extractable = isTextExtractable(f.original_name);
 
   return `<div id="file-summary" class="card panel section-spacer" style="border-left:3px solid var(--accent,#0d9488)">
-    <div class="mini-tip"><strong>Linked tasks</strong> ${state.data.tasks.filter(t => t.source_ids?.includes(f.id)).map(t => recordLink('task',t.id)).join(' ') || 'No linked tasks yet.'}
+    <button class="button secondary" data-preview="${f.id}">Open source preview</button>
+  <div class="mini-tip"><strong>Linked tasks</strong> ${state.data.tasks.filter(t => t.source_ids?.includes(f.id)).map(t => recordLink('task',t.id)).join(' ') || 'No linked tasks yet.'}
     ${relatedNotes('source_id',f.id)}${recordHistory('file',f.id)}</div>
     <div class="panel-heading" style="flex-wrap:wrap;gap:8px">
       <span>✧ Literature Review & Notes · <strong>${esc(f.original_name)}</strong></span>
@@ -640,6 +644,7 @@ function filesPage() {
     'Collect primary texts, articles and research materials. Compare evidence and connect it to your notes and tasks.',
     `<span class="meta-tag">${allFiles.length} files · ${analyzedCount} extracted · ${citedCount} key/cited</span>`
   )}
+  <div class="rf-tools"><label>DOI or arXiv ID <input class="field" id="source-identifier" placeholder="10.… or arXiv:…"></label><button class="button secondary" id="import-reference">Import reference</button></div>
   <div id="drop-zone" class="file-drop" style="display:block">
     <span class="upload-icon">⇧</span>
     <h3>Drop research files here, or browse</h3>
@@ -1651,6 +1656,70 @@ document.addEventListener('keydown',e=>{
     if(e.key!=='Enter'){e.preventDefault();list[(idx+(e.key==='ArrowDown'?1:-1)+list.length)%list.length].focus();}
   }
 });
+const matrixFields=['Methodology','Governing equations','Boundary conditions','Key findings','Limitations'];
+function dimensions(){return [...new Set([...matrixFields,...state.data.files.flatMap(f=>Object.keys(f.citation_meta?.dimensions||{}))])];}
+function previewDialog(){
+  let dlg=$('source-reader');
+  if(dlg)return dlg;
+  dlg=document.createElement('dialog');dlg.id='source-reader';dlg.className='dialog';dlg.setAttribute('aria-label','Source reader');
+  dlg.style.cssText='width:min(960px,96vw);max-width:96vw;max-height:92dvh;overflow:auto';document.body.append(dlg);return dlg;
+}
+function imageSource(file){return /\.(png|jpe?g)$/i.test(file.original_name);}
+async function readSource(id){
+  const file=state.data.files.find(f=>f.id===id);if(!file)return;
+  const dlg=previewDialog();dlg.dataset.id=id;dlg.innerHTML='<div class="dialog-inner"><div class="dialog-top"><h2>'+esc(file.original_name)+'</h2><form method="dialog"><button class="tiny-btn">Close</button></form></div><section id="reader-body" aria-live="polite">Opening source…</section></div>';
+  dlg.showModal();const body=$('reader-body');
+  if(imageSource(file)){
+    const other=state.data.files.filter(f=>f.id!==id&&imageSource(f));
+    body.innerHTML='<label>Compare with <select id="compare-image">'+recordOptions(other,'original_name')+'</select></label><div style="display:flex;overflow:auto;gap:10px"><img data-lightbox src="/api/files/'+id+'/preview" alt="'+esc(file.original_name)+'" style="max-width:100%;min-width:0;object-fit:contain"><img id="second-image" hidden alt="Comparison image" style="max-width:50%;min-width:0;object-fit:contain"></div><button class="tiny-btn" id="zoom-plot">Zoom image</button>';
+    return;
+  }
+  try {
+    const result=await api('/files/'+id+'/preview');
+    body.innerHTML='<p>Select a passage, then save it with its source.</p><div class="inline-actions"><button data-quote="task">Create follow-up task</button><button data-quote="note">Save notebook quote</button></div><pre id="source-text" tabindex="0" style="white-space:pre-wrap;line-height:1.6;user-select:text"></pre>';
+    body.querySelector('pre').textContent=result.text||'No selectable text was extracted.';
+  }catch(e){body.textContent=e.message;}
+}
+document.addEventListener('selectionchange',()=>{
+  const box=$('source-text'),sel=window.getSelection();
+  if(box&&sel&&!sel.isCollapsed&&box.contains(sel.anchorNode)&&box.contains(sel.focusNode))box.dataset.quote=sel.toString().slice(0,4500);
+});
+document.addEventListener('change',e=>{
+  if(e.target.id==='compare-image'){
+    const img=$('second-image');img.hidden=!e.target.value;if(!img.hidden)img.src='/api/files/'+Number(e.target.value)+'/preview';
+    document.querySelector('[data-lightbox]').style.maxWidth=img.hidden?'100%':'50%';
+  }
+});
+document.addEventListener('click',async e=>{
+  const btn=e.target.closest('button');if(!btn)return;
+  try{
+    if(btn.id==='import-reference'){
+      const identifier=$('source-identifier').value.trim();if(!identifier)return;
+      btn.disabled=true;
+      try{const r=await api('/files/import',{method:'POST',body:{identifier}});state.activeReviewFileId=r.id;await reload();toast('Reference imported');}finally{btn.disabled=false;}
+    }
+    if(btn.dataset.preview)await readSource(Number(btn.dataset.preview));
+    if(btn.id==='zoom-plot'){
+      const img=document.querySelector('[data-lightbox]');img.style.maxWidth=img.style.maxWidth==='none'?'100%':'none';
+    }
+    if(btn.dataset.quote){
+      const quote=$('source-text')?.dataset.quote;
+      if(!quote)throw Error('Select a passage in the source first.');
+      const dialog=previewDialog(),id=Number(dialog.dataset.id),f=state.data.files.find(row=>row.id===id);
+      if(btn.dataset.quote==='task'){dialog.close();openTask({title:'Follow up on '+f.original_name.slice(0,150),description:quote,source_ids:[id]});}
+      else{await api('/notes',{method:'POST',body:{sourceId:id,body:quote}});dialog.close();await reload();toast('Quote saved with its source');}
+    }
+    if(btn.dataset.dimension||btn.dataset.newDimension){
+      const f=state.data.files.find(row=>row.id===Number(btn.dataset.dimension||btn.dataset.newDimension));
+      const key=(btn.dataset.key||prompt('Research dimension, e.g. Archive or Boundary conditions')||'').trim().slice(0,72);
+      if(!key||['__proto__','prototype','constructor'].includes(key))return;
+      const current=f.citation_meta||{},value=prompt(key,current.dimensions?.[key]||'');if(value===null)return;
+      await api('/files/'+f.id+'/metadata',{method:'PATCH',body:{citation_meta:{...current,dimensions:{...current.dimensions,[key]:value.slice(0,4000)}}}});
+      await reload();
+    }
+  }catch(error){toast(error.message,true);}
+});
+
 const boardStyles=document.createElement('style');
 boardStyles.textContent=".rf-tools,.rf-lane header,.rf-schedule,.rf-metric{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}.rf-tools{margin:0 0 1rem}.rf-tools [aria-pressed=true]{background:#243c38;color:white}.rf-board{display:grid;grid-template-columns:repeat(4,minmax(165px,1fr));gap:12px;overflow:auto;padding-bottom:8px}.rf-lane{background:#f5f7f6;border-radius:10px;border-top:3px solid var(--lane);padding:10px;min-height:180px}.lane-0{--lane:#8793a5}.lane-1{--lane:#c88b3c}.lane-2{--lane:#c16a6a}.lane-3{--lane:#389480}.rf-lane header{justify-content:space-between;margin-bottom:12px}.rf-card{display:grid;gap:10px;background:white;border:1px solid #d8dfdb;border-radius:8px;padding:12px;margin:8px 0;cursor:grab}.rf-card button{text-align:left}.rf-card small,.rf-presence{color:#47665c}.rf-presence{max-width:23vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem}.rf-detail{display:grid;gap:8px}.rf-detail h3{margin:12px 0 0}.rf-diff{background:#fcf1cb}.rf-schedule{flex-wrap:nowrap;padding:8px;border-bottom:1px solid #ddd}.rf-schedule>.text-link{width:20%;text-align:left}.rf-track{position:relative;height:32px;flex:1;background:#edf2ef;border-radius:5px}.rf-bar{position:absolute;top:3px;height:26px;min-width:20px;border:0;border-radius:5px;background:#35776c;color:white;display:flex;justify-content:space-between;align-items:center;touch-action:none;cursor:grab}.rf-bar span{cursor:ew-resize}.rf-metric{width:100%;background:none;border:0;padding:8px;text-align:left}.rf-metric b{width:130px}.rf-stack{display:flex;flex:1;height:10px;overflow:hidden;border-radius:5px}.rf-stack i{background:var(--lane)}.rf-graph{overflow:auto;max-height:480px}.rf-graph>div{position:relative}.rf-graph svg{position:absolute;inset:0;stroke:#89a89c;fill:none}.rf-graph button{position:absolute;width:146px;height:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:white}.rf-detail table{font-size:.8rem}#task-dialog{max-height:94dvh;overflow:auto}button:focus-visible,input:focus-visible{outline:3px solid #24847a;outline-offset:2px}@media print{.sidebar,.topbar,.mobile-nav,.rf-tools,.agent-feature{display:none!important}.app-area{margin:0!important}}@media(max-width:700px){.rf-presence{max-width:22vw}.rf-board{grid-template-columns:repeat(4,75vw)}#task-dialog{width:100%;max-width:100%;margin:auto 0 0;max-height:95dvh}}\n";
 document.head.append(boardStyles);
