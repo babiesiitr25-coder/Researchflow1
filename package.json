@@ -6,9 +6,12 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js"
+    "check": "node --check server.js && node --check public/app.js",
+    "postinstall": "node -e \"const fs=require('node:fs');const root='public/vendor/';fs.mkdirSync(root,{recursive:true});fs.cpSync('node_modules/katex/dist',root+'katex',{recursive:true});fs.copyFileSync('node_modules/@highlightjs/cdn-assets/highlight.min.js',root+'highlight.min.js');fs.copyFileSync('node_modules/@highlightjs/cdn-assets/styles/github.min.css',root+'highlight.css')\""
   },
-  "engines": {"node": ">=20"},
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "connect-pg-simple": "^10.0.0",
@@ -20,6 +23,8 @@
     "mammoth": "^1.10.0",
     "multer": "^2.0.2",
     "pdf-parse": "^1.1.1",
-    "pg": "^8.13.3"
+    "pg": "^8.13.3",
+    "katex": "0.19.1",
+    "@highlightjs/cdn-assets": "11.12.0"
   }
 }
