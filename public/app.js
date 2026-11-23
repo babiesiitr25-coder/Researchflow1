@@ -616,6 +616,14 @@ function renderComparisonPanel() {
   </div>`;
 }
 
+let uploadReport = null;
+let uploading = false;
+function uploadFeedback() {
+  if (!uploadReport || uploadReport.workspace !== state.workspace?.id) return '';
+  const {done,total,failures,current} = uploadReport;
+  return '<p>' + (current ? 'Uploading ' + esc(current) + '… · ' : '') + done + ' of ' + total + ' uploaded</p>' +
+    failures.map(message => '<div class="small-text">' + esc(message) + '</div>').join('');
+}
 function filesPage() {
   const allFiles = state.data.files;
   const shownFiles = filteredFiles();
@@ -628,13 +636,14 @@ function filesPage() {
     'Collect primary texts, articles and research materials. Compare evidence and connect it to your notes and tasks.',
     `<span class="meta-tag">${allFiles.length} files · ${analyzedCount} extracted · ${citedCount} key/cited</span>`
   )}
-  <label for="file-input" id="drop-zone" class="file-drop" style="display:block">
+  <div id="drop-zone" class="file-drop" style="display:block">
     <span class="upload-icon">⇧</span>
     <h3>Drop research files here, or browse</h3>
-    <p>PDF, DOCX, XLSX, CSV, INP, DAT, LOG, STA, MSG, TXT, ZIP and more · 15 MB per file</p>
-    <span class="button secondary small">Browse files</span>
+    <p>PDF, DOCX, XLSX, CSV, INP, DAT, LOG, STA, MSG, TXT, ZIP and more · 15 MiB per file</p>
+    <button type="button" class="button secondary small" id="browse-files">Browse files</button>
     <input id="file-input" type="file" hidden multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.json,.inp,.dat,.log,.sta,.msg,.odb,.py,.png,.jpg,.jpeg,.zip" />
-  </label>
+  </div>
+  <div id="upload-feedback" role="status" aria-live="polite">${uploadFeedback()}</div>
 
   ${renderActiveReviewDrawer()}
   ${renderComparisonPanel()}
@@ -843,26 +852,40 @@ async function handleAgent(message) {
 }
 
 async function uploadFiles(files) {
+  if (uploading) { toast('An upload is in progress. Add more files after it finishes.', true); return; }
   const list = Array.from(files);
-  for (const file of list) {
-    if (file.size > 15 * 1024 * 1024) {
-      toast(file.name + ' is larger than 15 MB', true);
-      continue;
-    }
-    const form = new FormData();
-    form.append('file', file);
-    if (state.libPhaseFilter !== 'All') {
-      form.append('project_phase', state.libPhaseFilter);
-    }
-    try {
-      toast('Uploading ' + file.name + '…');
-      await api('/files', { method: 'POST', body: form, form: true });
-      toast('Uploaded ' + file.name);
-    } catch (e) {
-      toast('Upload failed: ' + e.message, true);
-    }
+  const workspace = state.workspace.id;
+  const phase = state.libPhaseFilter;
+  const report = {workspace, total:list.length, done:0, current:'', failures:[]};
+  uploadReport = report;
+  uploading = true;
+  function display() {
+    const feedback = $('upload-feedback');
+    if (feedback) feedback.innerHTML = uploadFeedback();
   }
-  await reload();
+  try {
+    for (const file of list) {
+      if (state.workspace?.id !== workspace) { report.failures.push('Workspace switched. Remaining files were skipped.'); break; }
+      report.current = file.name;
+      display();
+      try {
+        if (file.size > 15 * 1024 * 1024) throw Error('exceeds the 15 MiB limit');
+        if (!/\.(pdf|docx|xlsx|csv|txt|md|json|inp|dat|log|sta|msg|odb|py|png|jpg|jpeg|zip)$/i.test(file.name)) throw Error('unsupported file type');
+        const form = new FormData();
+        form.append('file', file);
+        if (phase !== 'All') form.append('project_phase', phase);
+        await api('/files', {method:'POST', body:form, form:true});
+        report.done++;
+      } catch (error) {
+        report.failures.push(file.name + ' — ' + error.message);
+      }
+    }
+  } finally {
+    uploading = false;
+    report.current = '';
+    display();
+    if (state.workspace?.id === workspace) await reload();
+  }
 }
 
 async function runFileAnalysis(fileId, forceRefresh = false) {
@@ -1031,6 +1054,7 @@ document.addEventListener('submit', async e => {
 document.addEventListener('click', async e => {
   const el = e.target.closest('button');
   if (!el) return;
+  if (el.id === 'browse-files') { $('file-input').click(); return; }
   if (el.id === 'open-finder') {
     const finder = $('find-records');
     finder.showModal();
@@ -1331,7 +1355,9 @@ document.addEventListener('change', async e => {
     return;
   }
   if (t.id === 'file-input' && t.files?.length) {
-    uploadFiles(t.files);
+    const files = Array.from(t.files);
+    t.value = '';
+    uploadFiles(files);
     return;
   }
   if (t.id === 'select-all-files') {
