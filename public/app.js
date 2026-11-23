@@ -2378,15 +2378,33 @@ function labDownload(blob,name){
 }
 function labSvgBlob(){const svg=$('analysis-svg');if(!svg)throw Error('Create a valid figure first.');return new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml;charset=utf-8'});}
 async function labPng(a,dpi){
-  const img=new Image(),url=URL.createObjectURL(labSvgBlob());
-  try{img.src=url;await img.decode();const canvas=document.createElement('canvas');canvas.width=Math.round(+a.width*dpi/25.4);canvas.height=Math.round(+a.height*dpi/25.4);
-    if(canvas.width*canvas.height>4e7)throw Error('Reduce the dimensions for this resolution.');
-    canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height);
+  const svg=$('analysis-svg');if(!svg)throw Error('Create a valid figure first.');
+  const canvas=document.createElement('canvas');canvas.width=Math.round(+a.width*dpi/25.4);canvas.height=Math.round(+a.height*dpi/25.4);
+  if(canvas.width*canvas.height>4e7)throw Error('Reduce the dimensions for this resolution.');
+  const ctx=canvas.getContext('2d'),vb=svg.viewBox.baseVal;ctx.scale(canvas.width/vb.width,canvas.height/vb.height);
+  ctx.fillStyle='white';ctx.fillRect(0,0,vb.width,vb.height);
+  function paint(el){
+    const tag=el.localName;if(tag==='defs')return;
+    const attr=k=>el.getAttribute(k),n=k=>Number(attr(k))||0;
+    ctx.save();
+    if(attr('clip-path')){const c=svg.querySelector('clipPath rect');ctx.beginPath();ctx.rect(+c.getAttribute('x'),+c.getAttribute('y'),+c.getAttribute('width'),+c.getAttribute('height'));ctx.clip();}
+    if(el.transform?.baseVal.numberOfItems){for(const t of Array.from(el.transform.baseVal)){const m=t.matrix;ctx.transform(m.a,m.b,m.c,m.d,m.e,m.f);}}
+    ctx.fillStyle=attr('fill')||svg.getAttribute('fill');ctx.strokeStyle=attr('stroke')||'#273738';ctx.lineWidth=n('stroke-width')||1;
+    if(attr('stroke-dasharray'))ctx.setLineDash(attr('stroke-dasharray').split(/ +/).map(Number));
+    if(tag==='g'){for(const child of el.children)paint(child);}
+    else if(tag==='text'){ctx.font=(attr('font-weight')||'normal')+' '+(n('font-size')||+svg.getAttribute('font-size'))+'px '+svg.getAttribute('font-family');ctx.textAlign=({'end':'right','middle':'center'})[attr('text-anchor')]||'left';ctx.fillText(el.textContent,n('x'),n('y'));}
+    else if(tag==='path')ctx.stroke(new Path2D(attr('d')));
+    else if(tag==='line'){ctx.beginPath();ctx.moveTo(n('x1'),n('y1'));ctx.lineTo(n('x2'),n('y2'));ctx.stroke();}
+    else if(tag==='rect'&&attr('width')!=='100%')ctx.fillRect(n('x'),n('y'),n('width'),n('height'));
+    else if(tag==='circle'){ctx.beginPath();ctx.arc(n('cx'),n('cy'),n('r'),0,Math.PI*2);ctx.fill();}
+    else if(tag==='polygon'){ctx.beginPath();for(let i=0;i<el.points.numberOfItems;i++){const p=el.points.getItem(i);if(i)ctx.lineTo(p.x,p.y);else ctx.moveTo(p.x,p.y);}ctx.closePath();ctx.fill();}
+    ctx.restore();
+  }
+  for(const el of svg.children)paint(el);
     const blob=await new Promise((ok,fail)=>canvas.toBlob(b=>b?ok(b):fail(Error('PNG export failed.')),'image/png'));
     const bytes=new Uint8Array(await blob.arrayBuffer()),chunk=new Uint8Array(21),view=new DataView(chunk.buffer);view.setUint32(0,9);chunk.set([112,72,89,115],4);view.setUint32(8,Math.round(dpi/.0254));view.setUint32(12,Math.round(dpi/.0254));chunk[16]=1;
     let crc=0xffffffff;for(const byte of chunk.slice(4,17)){crc^=byte;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}view.setUint32(17,(crc^0xffffffff)>>>0);
     const parts=[bytes.slice(0,33),chunk],dv=new DataView(bytes.buffer);for(let i=33;i<bytes.length;){const n=dv.getUint32(i)+12;if(String.fromCharCode(...bytes.slice(i+4,i+8))!=='pHYs')parts.push(bytes.slice(i,i+n));i+=n;}return new Blob(parts,{type:'image/png'});
-  }finally{URL.revokeObjectURL(url);}
 }
 function labPrint(){
   const svg=$('analysis-svg');if(!svg)throw Error('Create a figure first.');
