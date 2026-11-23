@@ -165,7 +165,7 @@ async function required(req, res, next) {
     const { workspace, workspaces } = await resolveActiveWorkspace(req);
     if (!workspace) return err(res, 'No workspace membership found', 403);
     if (req.headers['x-workspace-id'] && Number(req.headers['x-workspace-id']) !== workspace.id) return err(res,'Workspace changed. Refresh the page.',409);
-    if (workspace.role === 'viewer' && req.method !== 'GET' && !['/api/workspaces','/api/workspaces/switch','/api/agent/interpret','/api/files/compare'].includes(req.path)) return err(res,'Editor access required',403);
+    if (workspace.role === 'viewer' && req.method !== 'GET' && !['/api/workspaces','/api/workspaces/switch','/api/agent/interpret','/api/files/compare','/api/live/cursor'].includes(req.path)) return err(res,'Editor access required',403);
     req.workspace = workspace;
     req.workspaceId = workspace.id;
     req.workspaces = workspaces;
@@ -302,6 +302,20 @@ CREATE TRIGGER researchflow_task_guard BEFORE INSERT OR UPDATE ON tasks FOR EACH
   });
   await q(`CREATE TABLE IF NOT EXISTS agent_proposals(id bigserial PRIMARY KEY,workspace_id integer NOT NULL REFERENCES workspaces ON DELETE CASCADE,user_id integer NOT NULL REFERENCES users ON DELETE CASCADE,actions jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),applied_at timestamptz);
     CREATE INDEX IF NOT EXISTS proposal_workspace_user ON agent_proposals(workspace_id,user_id,id)`);
+  await transaction(async c=>{
+    await c.query('SELECT pg_advisory_xact_lock(723,1)');
+    if((await c.query("SELECT 1 FROM schema_migrations WHERE name='003-workspace-roles-and-throughput'")).rowCount)return;
+    await c.query(`UPDATE workspace_members SET role='editor' WHERE role='member';
+      ALTER TABLE workspace_members ALTER COLUMN role SET DEFAULT 'editor';
+      CREATE TABLE task_status_events(id bigserial PRIMARY KEY,workspace_id integer NOT NULL REFERENCES workspaces ON DELETE CASCADE,task_id integer REFERENCES tasks ON DELETE SET NULL,phase text NOT NULL,status text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
+      CREATE INDEX status_event_time ON task_status_events(workspace_id,created_at);
+      CREATE FUNCTION record_task_status_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF TG_OP='INSERT' OR OLD.status IS DISTINCT FROM NEW.status THEN
+          INSERT INTO task_status_events(workspace_id,task_id,phase,status) VALUES(NEW.workspace_id,NEW.id,NEW.phase,NEW.status);
+        END IF; RETURN NEW; END $$;
+      CREATE TRIGGER record_task_status_event AFTER INSERT OR UPDATE OF status ON tasks FOR EACH ROW EXECUTE FUNCTION record_task_status_event();
+      INSERT INTO schema_migrations VALUES('003-workspace-roles-and-throughput')`);
+  });
   const email = OWNER_EMAIL.trim().toLowerCase();
   const hash = await bcrypt.hash(OWNER_PASSWORD, 12);
   let ownerId;
@@ -511,12 +525,12 @@ app.post('/api/auth/accept', authLimit, async (req, res, next) => {
       }
 
       await c.query(
-        `INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member') ON CONFLICT DO NOTHING`,
+        `INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'editor') ON CONFLICT DO NOTHING`,
         [targetWsId, memberUser.id]
       );
       await c.query('UPDATE invitations SET used_at=NOW() WHERE id=$1', [inv.rows[0].id]);
       await activity(c, targetWsId, memberUser.id, `${memberUser.name} joined the workspace`);
-      return { user: memberUser, workspace: { ...wsRes.rows[0], role: 'member' } };
+      return { user: memberUser, workspace: { ...wsRes.rows[0], role: 'editor' } };
     });
 
     const workspaces = await getUserWorkspaces(user.id);
@@ -648,7 +662,7 @@ function workspaceRoutes({ app, required, transaction, pool, activity, checkReco
       const id=req.workspaceId;
       res.set({'Content-Type':'text/event-stream','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
       res.flushHeaders();
-      const peer={res,name:rows[0].name,user:req.session.userId,view:String(req.query.view || 'Overview').slice(0,100)};
+      const peer={res,name:rows[0].name,user:req.session.userId,session:req.sessionID,tab:String(req.query.tab||'').slice(0,80),lastCursor:0,view:String(req.query.view || 'Overview').slice(0,100)};
       if (!streams.has(id)) streams.set(id,new Set());
       streams.get(id).add(peer);
       presence(id);
@@ -662,6 +676,31 @@ function workspaceRoutes({ app, required, transaction, pool, activity, checkReco
         else presence(id);
       });
     } catch(e){next(e);}
+  });
+  app.post('/api/live/cursor',required,(req,res)=>{
+    const peers=streams.get(req.workspaceId);
+    const peer=[...(peers||[])].find(p=>p.session===req.sessionID&&p.tab===req.body.tab);
+    if(!peer||!Number.isFinite(req.body.x)||!Number.isFinite(req.body.y))return res.sendStatus(204);
+    const now=Date.now();
+    if(now-peer.lastCursor>=180){
+      peer.lastCursor=now;
+      const payload={user:peer.user,name:peer.name,tab:peer.tab,x:Math.max(0,Math.min(1,req.body.x)),y:Math.max(0,Math.min(1,req.body.y)),view:peer.view};
+      for(const other of peers)if(other!==peer&&other.view===peer.view)send(other.res,'cursor',payload);
+    }
+    res.sendStatus(204);
+  });
+  app.patch('/api/members/:id',required,async(req,res,next)=>{
+    try{
+      if(req.workspace.role!=='owner')return err(res,'Workspace owner access required',403);
+      const role=req.body.role;
+      if(!['viewer','editor'].includes(role))return err(res,'Choose Editor or Viewer');
+      const id=Number(req.params.id);
+      await transaction(async c=>{
+        const r=await c.query("UPDATE workspace_members SET role=$1 WHERE user_id=$2 AND workspace_id=$3 AND role<>'owner' RETURNING user_id",[role,id,req.workspaceId]);
+        if(!r.rowCount)throw Object.assign(new Error('Choose an existing non-owner teammate'),{status:400});
+        await activity(c,req.workspaceId,req.session.userId,'Updated teammate role to '+role);
+      });broadcast(req.workspaceId,'change',{});res.json({ok:true});
+    }catch(e){next(e);}
   });
   app.use('/api',(req,res,next)=>{
     if(req.method!=='GET') res.once('finish',()=>{
@@ -777,6 +816,7 @@ app.get('/api/dashboard', required, async (req, res, next) => {
       q('SELECT status,capacity FROM board_limits WHERE workspace_id=$1',[wsId])
     ]);
     res.json({
+      velocity:(await q("SELECT phase,count(DISTINCT task_id)::int completed FROM task_status_events WHERE workspace_id=$1 AND status='Done' AND created_at>=now()-interval '7 days' GROUP BY phase",[wsId])).rows,
       dependencies:deps.rows,comments:comments.rows,runs:runs.rows,limits:limits.rows,
       workspace: req.workspace,
       maxSeats: MAX_SEATS,
