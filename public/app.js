@@ -2331,11 +2331,11 @@ function analysisPage(){
     select('group',human?'Text':'Group series by',[[-1,'All rows'],...cols])+
     (a.mode===labModes[2]?select('error','Error bars',['95% CI','SD','SE'])+(uniqueGroups.length>1?select('groupA','First group',[['','First available'],...uniqueGroups])+select('groupB','Second group',[['','Second available'],...uniqueGroups]):''):'')+'</div>'+
     '<p class="small-text">'+esc(guidance)+'</p>'+(trend?'<details><summary>Additional Y series</summary>'+cols.filter(([i])=>i!==+a.y).map(([i,h])=>'<label class="lab-inline"><input type="checkbox" data-lab-more="'+i+'" '+(a.more.includes(i)?'checked':'')+'> '+esc(h)+'</label>').join('')+'</details>':'')+'</section>'+
-    '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div id="lab-coverage" class="small-text"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
+    '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div id="lab-coverage" class="small-text"></div><div class="rf-tools"><details class="lab-export"><summary class="tiny-btn">Export figure</summary><p id="lab-export-spec"></p><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div></details>'+(write?'<button class="tiny-btn" data-note-preview>Add to notebook</button>':'')+'</div><p id="lab-method" class="small-text"></p></section>'+
     '<details class="card panel lab-settings"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
     ['xmin','xmax','ymin','ymax','xtick','ytick'].map((k,i)=>input(k,['X minimum','X maximum','Y minimum','Y maximum','X tick interval','Y tick interval'][i],'number','step="any" placeholder="Automatic"')).join('')+check('logx','Log X')+check('logy','Log Y')+check('gray','Grayscale')+check('grid','Gridlines')+(trend?check('fit','Show fitted curves'):'')+'</div><p class="small-text">Log tick intervals are in powers of ten. Category axes use the dataset order.</p><div id="lab-styles"></div></details>'+
     '<section class="card panel lab-output"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-headline" aria-live="polite"></div><details><summary>Detailed results and coefficients</summary><div id="lab-results"></div></details></section>'+
-    (write?'<section class="card panel lab-notebook"><h2>Research notebook</h2>'+input('caption','Figure caption')+button('notebook','Save figure and results to notebook')+'</section>':'')+'</div>';
+    '<dialog class="dialog" id="lab-note-preview" aria-labelledby="lab-preview-heading"><div class="dialog-inner"><h2 id="lab-preview-heading">Preview notebook entry</h2><div id="lab-preview-figure"></div>'+input('caption','Figure caption')+'<h3>Results</h3><div id="lab-preview-results"></div><div class="rf-tools"><button class="tiny-btn" data-preview-close>Cancel</button>'+button('notebook','Save to notebook')+'</div></div></dialog></div>';
 }
 function labQuality(a,d,m){
   const found=new Set();let dup=0;for(const r of d.rows){const k=JSON.stringify(r);if(found.has(k))dup++;found.add(k);}
@@ -2350,6 +2350,7 @@ function drawAnalysis(){
   try{$('lab-plot').innerHTML=labFigure(a,m);}catch(e){$('lab-plot').textContent=e.message;}
   labChoosePane(labPanes.get(a)||'Figure');
   $('lab-plot').querySelectorAll('[data-axis-edit],[data-legend-edit]').forEach(t=>{t.setAttribute('tabindex','0');t.setAttribute('role','button');t.setAttribute('aria-label','Edit '+(t.dataset.axisEdit||'legend')+' · '+t.textContent);});
+  $('lab-export-spec').textContent=a.width+' × '+a.height+' mm · '+a.font+' '+a.size+' pt · 300 DPI: '+Math.round(a.width*300/25.4)+' × '+Math.round(a.height*300/25.4)+' pixels · 600 DPI: '+Math.round(a.width*600/25.4)+' × '+Math.round(a.height*600/25.4)+' pixels';
   $('lab-method').textContent=m.message+(m.labels.length>30?' Figure displays the first 30 categories. All categories are in the results export.':'')+(a.logx||a.logy?' Log axes display positive values only.':'');
   $('lab-headline').innerHTML=m.highlights.length?'<p><strong>'+esc(m.highlights[0])+'</strong></p>'+(m.highlights.length>1?'<details><summary>More results</summary>'+m.highlights.slice(1,30).map(v=>'<p>'+esc(v)+'</p>').join('')+'</details>':''):'<p>See the detailed results and row checks for this selection.</p>';
   $('lab-results').innerHTML=labTable(['Series / group','Measure','Result'],m.results.slice(0,250))+(m.results.length>250?'<p>First 250 entries shown. Download the full table above.</p>':'');
@@ -2529,7 +2530,7 @@ document.addEventListener('click',async e=>{
     if(act.startsWith('png')){labDownload(await labPng(a,Number(act.slice(3))),stem+'-'+act.slice(3)+'dpi.png');return;}
     if(act==='pdf'){labPrint();return;}
     if(act==='notebook'){
-      const cap=a.caption||a.title,stamp=Date.now(),png=await labPng(a,300);if(analysisDraft()!==a)return;
+      const cap=$('lab-note-preview')?.querySelector('[data-lab="caption"]')?.value||a.caption||a.title,stamp=Date.now(),png=await labPng(a,300);if(analysisDraft()!==a)return;
       const snapshot=await labSave(a);if(analysisDraft()!==a)return;
       const figure=await labUpload(png,stem+' figure '+stamp+'.png');if(analysisDraft()!==a)return;
       const full=labCsv([['Series','Measure','Result'],...model.results]),tableText=model.results.slice(0,30).map(row=>'|'+row.map(x=>String(x).slice(0,60).replaceAll('|','¦')).join('|')+'|').join('\n');
@@ -2571,4 +2572,17 @@ for(const kind of ['input','change'])document.addEventListener(kind,e=>{
   if(e.target.matches('#lab-csv,[data-lab],[data-style],[data-lab-more],[data-lab-unit],[data-lab-type]'))labDirty(analysisDraft());
 });
 window.addEventListener('pagehide',()=>{if(!state.user)return;const a=analysisDraft();if(labStatus.get(a)==='Unsaved changes')labPersist(a);});
+document.addEventListener('click',e=>{
+  if(e.target.closest('[data-preview-close]')){$('lab-note-preview')?.close();return;}
+  if(!e.target.closest('[data-note-preview]'))return;
+  const svg=$('analysis-svg');if(!svg){toast('Create a figure before adding it to the notebook.',true);return;}
+  const a=analysisDraft(),model=labCompute(a,analysisRows(a.csv)),copy=svg.cloneNode(true);
+  copy.removeAttribute('id');copy.querySelectorAll('[tabindex]').forEach(el=>{el.removeAttribute('tabindex');el.removeAttribute('role');el.removeAttribute('data-axis-edit');el.removeAttribute('data-legend-edit');});
+  const clip=copy.querySelector('clipPath');if(clip)clip.id='lab-preview-clip';copy.querySelectorAll('[clip-path]').forEach(el=>el.setAttribute('clip-path','url(#lab-preview-clip)'));
+  $('lab-preview-figure').replaceChildren(copy);const dialog=$('lab-note-preview');
+  const caption=dialog.querySelector('[data-lab="caption"]');caption.value=a.caption||a.title;
+  $('lab-preview-results').innerHTML=labTable(['Series / group','Measure','Result'],model.results.slice(0,30))+'<p>The entry includes a fixed figure and analysis version. All '+model.results.length+' result rows are attached as CSV.</p>';
+  dialog.showModal();
+});
+analysisStyle.textContent+=`.lab-export summary{display:list-item;cursor:pointer}.lab-export[open]{flex:1 1 100%}#lab-note-preview{width:min(760px,96vw);max-height:92dvh;overflow:auto}#lab-preview-figure svg{display:block;max-width:100%;height:auto;margin:auto}#lab-preview-results .lab-scroll{max-height:210px}`;
 boot();
