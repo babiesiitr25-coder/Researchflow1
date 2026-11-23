@@ -163,6 +163,8 @@ async function required(req, res, next) {
     if (!req.session?.userId) return err(res, 'Sign in required', 401);
     const { workspace, workspaces } = await resolveActiveWorkspace(req);
     if (!workspace) return err(res, 'No workspace membership found', 403);
+    if (req.headers['x-workspace-id'] && Number(req.headers['x-workspace-id']) !== workspace.id) return err(res,'Workspace changed. Refresh the page.',409);
+    if (workspace.role === 'viewer' && req.method !== 'GET' && !['/api/workspaces','/api/workspaces/switch','/api/agent/interpret','/api/files/compare'].includes(req.path)) return err(res,'Editor access required',403);
     req.workspace = workspace;
     req.workspaceId = workspace.id;
     req.workspaces = workspaces;
@@ -233,6 +235,58 @@ async function initialize() {
       ADD COLUMN IF NOT EXISTS ai_review_data JSONB DEFAULT NULL
   `);
 
+  await transaction(async c=>{
+    await c.query('SELECT pg_advisory_xact_lock(723,1)');
+    await c.query('CREATE TABLE IF NOT EXISTS schema_migrations(name text PRIMARY KEY)');
+    if (!(await c.query("SELECT 1 FROM schema_migrations WHERE name='001-research-workspace'")).rowCount) {
+      await c.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_date date,
+                  ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 1;
+CREATE TABLE IF NOT EXISTS board_limits (
+  workspace_id integer REFERENCES workspaces ON DELETE CASCADE,
+  status text NOT NULL, capacity integer NOT NULL CHECK(capacity > 0),
+  PRIMARY KEY(workspace_id,status)
+);
+CREATE TABLE IF NOT EXISTS task_dependencies (
+  predecessor integer REFERENCES tasks ON DELETE CASCADE,
+  successor integer REFERENCES tasks ON DELETE CASCADE,
+  PRIMARY KEY(predecessor,successor), CHECK(predecessor <> successor)
+);
+CREATE INDEX IF NOT EXISTS dependencies_successor ON task_dependencies(successor);
+CREATE TABLE IF NOT EXISTS task_comments (
+  id serial PRIMARY KEY, task_id integer NOT NULL REFERENCES tasks ON DELETE CASCADE,
+  author_id integer REFERENCES users, body text NOT NULL, created_at timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS comments_task ON task_comments(task_id,id);
+CREATE TABLE IF NOT EXISTS experiment_runs (
+  id serial PRIMARY KEY, task_id integer NOT NULL REFERENCES tasks ON DELETE CASCADE,
+  label text NOT NULL, parameters text NOT NULL, mesh text NOT NULL, time_step text NOT NULL,
+  solver_status text NOT NULL, convergence text NOT NULL,
+  output_id integer REFERENCES research_files ON DELETE SET NULL, created_at timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS runs_task ON experiment_runs(task_id,id);
+CREATE INDEX IF NOT EXISTS task_workspace_status ON tasks(workspace_id,status);
+CREATE INDEX IF NOT EXISTS sources_reverse ON task_sources(source_id,task_id);
+CREATE INDEX IF NOT EXISTS workspace_activity ON activities(workspace_id,id);
+CREATE OR REPLACE FUNCTION researchflow_task_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE cap integer;
+BEGIN
+  IF TG_OP='UPDATE' THEN NEW.revision := OLD.revision+1; END IF;
+  IF NEW.start_date > NEW.due_date THEN RAISE EXCEPTION 'Start date follows due date' USING ERRCODE='23514'; END IF;
+  IF TG_OP='INSERT' OR NEW.status IS DISTINCT FROM OLD.status THEN
+    PERFORM pg_advisory_xact_lock(721,NEW.workspace_id);
+    SELECT capacity INTO cap FROM board_limits WHERE workspace_id=NEW.workspace_id AND status=NEW.status;
+    IF cap IS NOT NULL AND (SELECT count(*) FROM tasks WHERE workspace_id=NEW.workspace_id AND status=NEW.status)>=cap THEN
+      RAISE EXCEPTION 'Column work limit reached' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS researchflow_task_guard ON tasks;
+CREATE TRIGGER researchflow_task_guard BEFORE INSERT OR UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION researchflow_task_guard();
+`);
+      await c.query("INSERT INTO schema_migrations VALUES('001-research-workspace')");
+    }
+  });
   const email = OWNER_EMAIL.trim().toLowerCase();
   const hash = await bcrypt.hash(OWNER_PASSWORD, 12);
   let ownerId;
@@ -563,12 +617,109 @@ app.post('/api/auth/invite', required, authLimit, async (req, res, next) => {
 });
 
 // --- Dashboard Data (Strictly Scoped to Active Workspace) ---
+function workspaceRoutes({ app, required, transaction, pool, activity, checkRecord, normalTask, statuses, err }) {
+  const streams = new Map();
+  const send = (res,type,payload) => res.write('event: '+type+'\ndata: '+JSON.stringify(payload)+'\n\n');
+  function broadcast(id,type,data) {
+    for (const item of streams.get(id) || []) send(item.res,type,data);
+  }
+  function presence(id) {
+    broadcast(id,'presence',[...(streams.get(id) || [])].map(({name,view,user})=>({name,view,user})));
+  }
+  app.get('/api/live',required,async (req,res,next)=>{
+    try {
+      if (Number(req.query.workspace)!==req.workspaceId) return err(res,'Workspace changed',409);
+      const {rows} = await pool.query('SELECT name FROM users WHERE id=$1',[req.session.userId]);
+      const id=req.workspaceId;
+      res.set({'Content-Type':'text/event-stream','Cache-Control':'no-cache','X-Accel-Buffering':'no'});
+      res.flushHeaders();
+      const peer={res,name:rows[0].name,user:req.session.userId,view:String(req.query.view || 'Overview').slice(0,100)};
+      if (!streams.has(id)) streams.set(id,new Set());
+      streams.get(id).add(peer);
+      presence(id);
+      const pulse=setInterval(()=>res.write(': heartbeat\n\n'),20000);
+      // Periodic reconnect revalidates session membership.
+      const expiry=setTimeout(()=>res.end(),120000);
+      res.on('close',()=>{
+        clearInterval(pulse); clearTimeout(expiry);
+        streams.get(id)?.delete(peer);
+        if (!streams.get(id)?.size) streams.delete(id);
+        else presence(id);
+      });
+    } catch(e){next(e);}
+  });
+  app.use('/api',(req,res,next)=>{
+    if(req.method!=='GET') res.once('finish',()=>{
+      if(res.statusCode<300 && req.workspaceId) broadcast(req.workspaceId,'change',{});
+    });
+    next();
+  });
+  const post=(route,handler)=>app.post('/api/'+route,required,async(req,res,next)=>{
+    try {
+      const result=await transaction(async c=>{
+        await c.query('SELECT pg_advisory_xact_lock(721,$1)',[req.workspaceId]);
+        return handler(c,req);
+      });
+      res.json(result || {ok:true});
+    }catch(e){next(e);}
+  });
+  const invalid=message=>Object.assign(new Error(message),{status:400});
+  post('board/batch',async(c,req)=>{
+    const {items}=req.body;
+    if(!Array.isArray(items)||!items.length||items.length>500) throw invalid('Select 1–500 tasks');
+    const saved=[];
+    for(const item of items){
+      const fields=normalTask(item.changes || {},true);
+      if(!Object.keys(fields).length) throw invalid('Choose a change');
+      if(fields.assignee_id!=null){
+        const member=await c.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[req.workspaceId,fields.assignee_id]);
+        if(!member.rowCount) throw invalid('Unknown teammate');
+      }
+      const keys=Object.keys(fields);
+      const r=await c.query('UPDATE tasks SET '+keys.map((k,i)=>k+'=$'+(i+4)).join(',')+',updated_at=now() WHERE workspace_id=$1 AND id=$2 AND revision=$3 RETURNING id,revision',[req.workspaceId,item.id,item.revision,...Object.values(fields)]);
+      if(!r.rowCount) throw Object.assign(new Error('A task changed. Review its current version and retry.'),{status:409});
+      saved.push(r.rows[0]);
+      await activity(c,req.workspaceId,req.session.userId,'Changed '+keys.join(', '),'task',item.id);
+    }
+    return saved;
+  });
+  post('board/limit',async(c,req)=>{
+    const {status,capacity}=req.body;
+    if(!statuses.includes(status)||!Number.isSafeInteger(capacity)||capacity<0) throw invalid('Invalid column limit');
+    await c.query('DELETE FROM board_limits WHERE workspace_id=$1 AND status=$2',[req.workspaceId,status]);
+    if(capacity) await c.query('INSERT INTO board_limits VALUES($1,$2,$3)',[req.workspaceId,status,capacity]);
+  });
+  post('tasks/:id/detail',async(c,req)=>{
+    const task=Number(req.params.id),ws=req.workspaceId,b=req.body;
+    await checkRecord(c,'tasks',ws,task);
+    if(b.kind==='dependency'){
+      await checkRecord(c,'tasks',ws,b.predecessor);
+      const cycle=await c.query('WITH RECURSIVE reach(id) AS (SELECT $1::int UNION SELECT successor FROM task_dependencies d JOIN reach r ON d.predecessor=r.id) SELECT 1 FROM reach WHERE id=$2',[task,b.predecessor]);
+      if(cycle.rowCount) throw invalid('These tasks would form a dependency cycle');
+      await c.query('INSERT INTO task_dependencies VALUES($1,$2) ON CONFLICT DO NOTHING',[b.predecessor,task]);
+    }else if(b.kind==='unlink'){
+      await c.query('DELETE FROM task_dependencies WHERE predecessor=$1 AND successor=$2',[b.predecessor,task]);
+    }else if(b.kind==='comment'){
+      const body=String(b.body||'').trim();
+      if(!body||body.length>5000) throw invalid('Enter a comment of up to 5000 characters');
+      await c.query('INSERT INTO task_comments(task_id,author_id,body) VALUES($1,$2,$3)',[task,req.session.userId,body]);
+    }else if(b.kind==='run'){
+      if(!String(b.label||'').trim()) throw invalid('Enter a run name');
+      await checkRecord(c,'research_files',ws,b.outputId);
+      await c.query('INSERT INTO experiment_runs(task_id,label,parameters,mesh,time_step,solver_status,convergence,output_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[task,...['label','parameters','mesh','timeStep','status','convergence'].map(k=>String(b[k]||'').slice(0,5000)),b.outputId||null]);
+    }else throw invalid('Unknown detail type');
+    await activity(c,ws,req.session.userId,'Updated '+b.kind,'task',task);
+  });
+}
+
+workspaceRoutes({app,required,transaction,pool,activity,checkRecord,normalTask,statuses,err});
+
 app.get('/api/dashboard', required, async (req, res, next) => {
   try {
     const wsId = req.workspaceId;
-    const [tasks, notes, files, activities, members] = await Promise.all([
+    const [tasks, notes, files, activities, members, deps, comments, runs, limits] = await Promise.all([
       q(
-        `SELECT t.*,ARRAY(SELECT source_id FROM task_sources WHERE task_id=t.id) AS source_ids,to_char(t.due_date,'YYYY-MM-DD') AS due_date,u.name AS assignee_name
+        `SELECT t.*,to_char(t.start_date,'YYYY-MM-DD') AS start_date,ARRAY(SELECT source_id FROM task_sources WHERE task_id=t.id) AS source_ids,to_char(t.due_date,'YYYY-MM-DD') AS due_date,u.name AS assignee_name
          FROM tasks t LEFT JOIN users u ON t.assignee_id=u.id
          WHERE t.workspace_id=$1
          ORDER BY CASE t.status WHEN 'In progress' THEN 0 WHEN 'Blocked' THEN 1 WHEN 'To do' THEN 2 ELSE 3 END, t.updated_at DESC LIMIT 500`,
@@ -605,8 +756,13 @@ app.get('/api/dashboard', required, async (req, res, next) => {
          ORDER BY wm.joined_at ASC`,
         [wsId]
       )
+      ,q('SELECT d.* FROM task_dependencies d JOIN tasks t ON t.id=d.successor WHERE t.workspace_id=$1',[wsId]),
+      q('SELECT c.*,u.name FROM task_comments c JOIN tasks t ON t.id=c.task_id JOIN users u ON u.id=c.author_id WHERE t.workspace_id=$1 ORDER BY c.id',[wsId]),
+      q('SELECT r.* FROM experiment_runs r JOIN tasks t ON t.id=r.task_id WHERE t.workspace_id=$1 ORDER BY r.id',[wsId]),
+      q('SELECT status,capacity FROM board_limits WHERE workspace_id=$1',[wsId])
     ]);
     res.json({
+      dependencies:deps.rows,comments:comments.rows,runs:runs.rows,limits:limits.rows,
       workspace: req.workspace,
       maxSeats: MAX_SEATS,
       tasks: tasks.rows,
@@ -628,6 +784,7 @@ const taskFields = {
   status: 'status',
   priority: 'priority',
   assigneeId: 'assignee_id',
+  startDate: 'start_date',
   dueDate: 'due_date'
 };
 
@@ -718,6 +875,7 @@ app.patch('/api/tasks/:id', required, async (req, res, next) => {
         );
         if (!m.rowCount) throw new Error('Invalid assignee for this workspace');
       }
+      if (req.body.revision != null && !(await c.query('SELECT 1 FROM tasks WHERE workspace_id=$1 AND id=$2 AND revision=$3 FOR UPDATE',[wsId,req.params.id,req.body.revision])).rowCount) return Promise.reject(Object.assign(new Error('Task changed. Reopen to edit the current version.'),{status:409}));
       const fields = Object.keys(t);
       const values = fields.map(k => t[k]);
       const r = await c.query(
@@ -1217,6 +1375,7 @@ app.use(express.static(publicDir, { index: false, maxAge: '15m' }));
 app.get(['/', '/invite'], (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 app.use('/api', (req, res) => err(res, 'Endpoint not found', 404));
 app.use((e, req, res, next) => {
+  if ([400,409].includes(e.status) || /^(Invalid|Unknown teammate)/.test(e.message) || ['23514','22007','22008'].includes(e.code)) return err(res,e.message,e.status || 400);
   console.error('Request error:', e);
   if (e instanceof multer.MulterError) {
     return err(res, e.code === 'LIMIT_FILE_SIZE' ? 'File exceeds 15 MB limit' : e.message, 413);
