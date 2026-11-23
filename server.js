@@ -956,6 +956,62 @@ app.delete('/api/notes/:id', required, async (req, res, next) => {
 // --- Research Library File Routes ---
 const uploads = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
 
+function plainMetadata(value){
+  return String(value || '').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().slice(0,15000);
+}
+async function resolveIdentifier(input){
+  let id=String(input||'').trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i,'').replace(/^doi:\s*/i,'');
+  const arxiv=id.match(/^(?:arxiv:|https?:\/\/arxiv\.org\/abs\/)?(\d{4}\.\d{4,5}|[a-z-]+\/\d{7})(?:v\d+)?$/i);
+  if(arxiv)id='10.48550/arXiv.'+arxiv[1];
+  if(!/^10\.\d{4,9}\/\S{1,200}$/i.test(id))throw Object.assign(new Error('Enter a DOI or arXiv identifier'),{status:400});
+  const get=async url=>{
+    const r=await fetch(url,{signal:AbortSignal.timeout(9000)});
+    if(!r.ok)return null;
+    return r.json();
+  };
+  if(!/^10\.48550\//i.test(id)){
+    const raw=(await get('https://api.crossref.org/works/'+encodeURIComponent(id)))?.message;
+    if(raw)return {doi:id,title:plainMetadata(raw.title?.[0]),authors:(raw.author||[]).map(a=>a.name||[a.given,a.family].filter(Boolean).join(' ')).join(', '),year:raw.published?.['date-parts']?.[0]?.[0],journal:raw['container-title']?.[0],abstract:plainMetadata(raw.abstract),tags:(raw.subject||[]).slice(0,25)};
+  }
+  const raw=(await get('https://api.datacite.org/dois/'+encodeURIComponent(id)))?.data?.attributes;
+  if(!raw)throw Object.assign(new Error('No metadata found for that identifier'),{status:400});
+  return {doi:id,title:plainMetadata(raw.titles?.[0]?.title),authors:(raw.creators||[]).map(a=>a.name).join(' and '),year:raw.publicationYear,journal:raw.publisher,abstract:plainMetadata(raw.descriptions?.find(d=>d.descriptionType==='Abstract')?.description),tags:(raw.subjects||[]).map(s=>s.subject).slice(0,25)};
+}
+app.post('/api/files/import',required,async(req,res,next)=>{
+  try{
+    const meta=await resolveIdentifier(req.body.identifier);
+    const id=await transaction(async c=>{
+      await c.query('SELECT pg_advisory_xact_lock(724,$1)',[req.workspaceId]);
+      const match=await c.query("SELECT id FROM research_files WHERE workspace_id=$1 AND lower(citation_meta->>'doi')=lower($2)",[req.workspaceId,meta.doi]);
+      if(match.rowCount)return match.rows[0].id;
+      const file=Buffer.from([meta.title,meta.authors,meta.year,meta.doi,meta.abstract].filter(Boolean).join('\n\n'));
+      const r=await c.query("INSERT INTO research_files(workspace_id,original_name,mime_type,bytes,content,uploaded_by,citation_meta,tags) VALUES($1,$2,'text/plain',$3,$4,$5,$6,$7) RETURNING id",[req.workspaceId,(meta.title||meta.doi).slice(0,220)+'.txt',file.length,file,req.session.userId,meta,meta.tags]);
+      await activity(c,req.workspaceId,req.session.userId,'Imported reference: '+meta.title,'file',r.rows[0].id);
+      return r.rows[0].id;
+    });
+    res.json({id});
+  }catch(e){if(e.name==='TimeoutError'||e.message==='fetch failed')return err(res,'Metadata provider unavailable. Try again.',503);next(e);}
+});
+app.get('/api/files/:id/preview',required,async(req,res,next)=>{
+  try{
+    const {rows}=await q('SELECT original_name,content FROM research_files WHERE workspace_id=$1 AND id=$2',[req.workspaceId,req.params.id]);
+    const f=rows[0];if(!f)return err(res,'File not found',404);
+    res.set('Cache-Control','private, no-store');
+    if(/\.(png|jpe?g)$/i.test(f.original_name)){
+      const png=f.content.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'));
+      const jpeg=f.content.subarray(0,3).equals(Buffer.from('ffd8ff','hex'));
+      if(!png&&!jpeg)return err(res,'Image format could not be read',422);
+      return res.type(png?'image/png':'image/jpeg').send(f.content);
+    }
+    let text;
+    if(/\.pdf$/i.test(f.original_name))text=(await pdf(f.content,{max:80})).text;
+    else if(/\.docx$/i.test(f.original_name))text=(await mammoth.extractRawText({buffer:f.content})).value;
+    else if(/\.(txt|csv|json|md|inp|py|sta|msg|dat|log)$/i.test(f.original_name))text=f.content.subarray(0,160001).toString('utf8');
+    else return err(res,'This format is available as a download.',415);
+    res.json({text:text.slice(0,160000),truncated:text.length>160000});
+  }catch(e){return err(res,'Text preview could not be extracted. The original file is available to download.',422);}
+});
+
 app.post('/api/files', required, uploads.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return err(res, 'Choose a file');
@@ -965,12 +1021,23 @@ app.post('/api/files', required, uploads.single('file'), async (req, res, next) 
     if (!allowed.test(original)) return err(res, 'This file type is not supported');
     const phase = phases.includes(req.body?.project_phase) ? req.body.project_phase : 'Other';
 
+    let metadata={}, tags=[];
+    if (/\.pdf$/i.test(original)) {
+      try {
+        const doc=await pdf(req.file.buffer,{max:3});
+        const info=doc.info||{};
+        metadata={title:plainMetadata(info.Title),authors:plainMetadata(info.Author),abstract:plainMetadata(doc.text.match(/\babstract\b[\s:.-]+([\s\S]{30,2500}?)(?=\n\s*(?:key\s?words|introduction|1\.\s)|$)/i)?.[1])};
+        tags=String(info.Keywords||'').split(/[,;]/).map(x=>x.trim()).filter(Boolean).slice(0,25);
+        const year=String(info.CreationDate||'').match(/(?:D:)?((?:19|20)\d{2})/);
+        if(year)metadata.document_creation_year=year[1];
+      }catch{ /* Extraction is optional. Preserve the uploaded original. */ }
+    }
     const stored = await transaction(async c => {
       const r = await c.query(
-        `INSERT INTO research_files(workspace_id,original_name,mime_type,bytes,content,uploaded_by,project_phase)
-         VALUES($1,$2,$3,$4,$5,$6,$7)
+        `INSERT INTO research_files(workspace_id,original_name,mime_type,bytes,content,uploaded_by,project_phase,citation_meta,tags)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
          RETURNING id,original_name,mime_type,bytes,created_at,reading_status,project_phase,tags,citation_meta,user_notes,ai_review_data`,
-        [wsId, original, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.session.userId, phase]
+        [wsId, original, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.session.userId, phase,metadata,tags]
       );
       await activity(c, wsId, req.session.userId, 'Uploaded file: ' + original, 'file', r.rows[0].id);
       return r.rows[0];
