@@ -2298,6 +2298,15 @@ function analysisPage(){
   const check=(key,label)=>'<label><input type="checkbox" data-lab="'+key+'" '+(a[key]?'checked':'')+'> '+label+'</label>';
   const button=(key,label)=>'<button type="button" class="tiny-btn" data-lab-action="'+key+'">'+label+'</button>';
   const files=state.data.files, saved=files.filter(labSaved),source=files.filter(labSource),write=state.workspace?.role!=='viewer',human=a.mode===labModes[5],trend=a.mode===labModes[0];
+  const questions=['Fit a curve','Compare measurements with a model','Compare groups','Test an association','Describe a distribution','Compare themes across texts'];
+  const guidance=[
+    'Choose a predictor and a response, then select the curve to fit.',
+    'Match the measured and predicted values on each row. For example, at the same load, enter 2.4 mm measured and 2.6 mm predicted.',
+    'Choose a measurement and the column identifying the independent groups.',
+    'Choose two variables measured on the same observation.',
+    'Choose the numeric values whose distribution you want to see.',
+    'Use one row per coded occurrence. For word-normalised rates, repeat each text’s full word total on every row for that text.'
+  ][labModes.indexOf(a.mode)];
   const uniqueGroups=+a.group>=0?[...new Set(d.rows.map(r=>r[a.group]).filter(Boolean))]:[];
   return pageHeading('RESEARCH METHODS','Data analysis','Prepare a dataset, compare evidence, and save reproducible figures.')+
     '<div id="analysis-lab" class="lab-editor" data-pane="'+(labPanes.get(a)||'Figure')+'"><nav aria-label="Analysis panels" class="lab-tabs">'+['Data','Figure','Results'].map(v=>'<button class="tiny-btn" data-pane-choice="'+v+'">'+v+'</button>').join('')+'</nav><section class="card panel lab-data"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+'<span id="lab-save-status" role="status">'+esc(labStatus.get(a)||'Unsaved changes')+'</span>'+input('versionNote','Version note (optional)')+
@@ -2305,13 +2314,13 @@ function analysisPage(){
     (a.sourceId?'<button class="tiny-btn" data-preview="'+Number(a.sourceId)+'">View source record</button>':'')+'</div><details><summary>Paste or edit data</summary><textarea id="lab-csv" class="field" rows="6" aria-label="Delimited dataset">'+esc(a.pending??a.csv)+'</textarea>'+button('apply','Apply data')+'</details>'+
     (labWorkbook?.owner===a?'<div class="lab-fields"><label>Excel sheet<select id="lab-sheet" class="field">'+labOptions(labWorkbook.sheets.map((s,i)=>[i,s.name]),labWorkbook.index)+'</select></label><label>Header row<input class="field" id="lab-header" type="number" min="1" value="'+labWorkbook.header+'"></label>'+button('sheet','Use sheet and header')+'</div>':'')+
     '</section><details class="card panel lab-quality"><summary>Data preview and quality checks</summary><div id="lab-quality"></div></details>'+
-    '<section class="card panel lab-question"><h2>Research question</h2><div class="lab-fields">'+select('mode','Analysis',labModes)+
+    '<section class="card panel lab-question"><h2>Research question</h2><div class="lab-fields">'+select('mode','What do you want to find out?',labModes.map((v,i)=>[v,questions[i]]))+
     (trend?select('method','Regression model',labMethods)+select('type','Display',['Scatter','Line','Residuals']):'')+
-    (human?select('category','Coded category',cols)+select('frequency','Frequency measure',['Counts','Within-group %','Per 10,000 words'])+(a.frequency==='Per 10,000 words'?select('word','Word total column',[[-1,'Select word totals'],...cols]):''):
-    (![labModes[2],labModes[4]].includes(a.mode)?select('x',a.mode===labModes[1]?'Measured column':'X column',cols):'')+select('y',a.mode===labModes[1]?'Predicted column':'Response / Y column',cols))+
-    select('group',human?'Text or comparison group':'Group series by',[[-1,'All rows'],...cols])+
+    (human?select('category','Theme',cols)+select('frequency','Frequency measure',['Counts','Within-group %','Per 10,000 words'])+(a.frequency==='Per 10,000 words'?select('word','Total words in each text',[[-1,'Select word totals'],...cols]):''):
+    (![labModes[2],labModes[4]].includes(a.mode)?select('x',a.mode===labModes[1]?'Measured value':trend?'Predictor (X)':'First variable',cols):'')+select('y',a.mode===labModes[1]?'Predicted value':trend?'Response (Y)':a.mode===labModes[3]?'Second variable':'Measurement',cols))+
+    select('group',human?'Text':'Group series by',[[-1,'All rows'],...cols])+
     (a.mode===labModes[2]?select('error','Error bars',['95% CI','SD','SE'])+(uniqueGroups.length>1?select('groupA','First group',[['','First available'],...uniqueGroups])+select('groupB','Second group',[['','Second available'],...uniqueGroups]):''):'')+'</div>'+
-    (trend?'<details><summary>Additional Y series</summary>'+cols.filter(([i])=>i!==+a.y).map(([i,h])=>'<label class="lab-inline"><input type="checkbox" data-lab-more="'+i+'" '+(a.more.includes(i)?'checked':'')+'> '+esc(h)+'</label>').join('')+'</details>':'')+'</section>'+
+    '<p class="small-text">'+esc(guidance)+'</p>'+(trend?'<details><summary>Additional Y series</summary>'+cols.filter(([i])=>i!==+a.y).map(([i,h])=>'<label class="lab-inline"><input type="checkbox" data-lab-more="'+i+'" '+(a.more.includes(i)?'checked':'')+'> '+esc(h)+'</label>').join('')+'</details>':'')+'</section>'+
     '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
     '<details class="card panel lab-settings"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
     ['xmin','xmax','ymin','ymax','xtick','ytick'].map((k,i)=>input(k,['X minimum','X maximum','Y minimum','Y maximum','X tick interval','Y tick interval'][i],'number','step="any" placeholder="Automatic"')).join('')+check('logx','Log X')+check('logy','Log Y')+check('gray','Grayscale')+check('grid','Gridlines')+(trend?check('fit','Show fitted curves'):'')+'</div><p class="small-text">Log tick intervals are in powers of ten. Category axes use the dataset order.</p><div id="lab-styles"></div></details>'+
