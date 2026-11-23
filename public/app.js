@@ -67,6 +67,7 @@ async function api(path, { method = 'GET', body, form = false } = {}) {
       opts.body = JSON.stringify(body);
     }
   }
+  if (method !== 'GET' && state.workspace?.id) opts.headers['X-Workspace-Id'] = String(state.workspace.id);
   const response = await fetch('/api' + path, opts);
   let result = {};
   try {
@@ -97,6 +98,7 @@ async function reload({ quiet = false } = {}) {
     renderWorkspaceHeader();
     renderSidebar();
     render();
+    connectLive();
     $('sync-status').innerHTML = '<span class="online-dot"></span> Synced';
   } catch (e) {
     if (!quiet) toast(e.message, true);
@@ -105,6 +107,7 @@ async function reload({ quiet = false } = {}) {
 }
 
 function authView() {
+  closeLive();
   $('workspace').classList.add('hidden');
   $('auth').classList.remove('hidden');
   const params = new URLSearchParams(window.location.search);
@@ -230,6 +233,7 @@ function render() {
 
 function goto(page) {
   state.page = page;
+  connectLive();
   render();
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
@@ -254,7 +258,7 @@ function table(tasks, limit = 0) {
   return `<div class="task-table-wrap"><table class="task-table"><thead><tr><th>Task</th><th>Research phase</th><th>Assignee</th><th>Status</th><th>Priority</th><th>Due</th><th>Actions</th></tr></thead><tbody>${arr
     .map(
       t =>
-        `<tr><td><button class="text-link task-title" data-edit="${t.id}" title="Edit task">${esc(t.title)}</button></td><td>${esc(t.phase)}</td><td>${esc(t.assignee_name || 'Unassigned')}</td><td>${statusPill(t.status)}</td><td>${priorityPill(t.priority)}</td><td>${t.due_date ? shortDate(t.due_date + 'T12:00:00') : '—'}</td><td><div class="inline-actions"><button class="tiny-btn" data-edit="${t.id}">Edit</button>${t.status !== 'Done' ? `<button class="tiny-btn" data-complete="${t.id}" title="Mark completed">✓</button>` : ''}<button class="tiny-btn" data-delete-task="${t.id}" title="Delete task">✕</button></div></td></tr>`
+        `<tr><td>${state.page==="tasks"?pick(t):""}<button class="text-link task-title" data-edit="${t.id}" title="Edit task">${esc(t.title)}</button></td><td>${esc(t.phase)}</td><td>${esc(t.assignee_name || 'Unassigned')}</td><td>${statusPill(t.status)}</td><td>${priorityPill(t.priority)}</td><td>${t.due_date ? shortDate(t.due_date + 'T12:00:00') : '—'}</td><td><div class="inline-actions"><button class="tiny-btn" data-edit="${t.id}">Edit</button>${t.status !== 'Done' ? `<button class="tiny-btn" data-complete="${t.id}" title="Mark completed">✓</button>` : ''}<button class="tiny-btn" data-delete-task="${t.id}" title="Delete task">✕</button></div></td></tr>`
     )
     .join('')}</tbody></table></div>`;
 }
@@ -272,7 +276,7 @@ function overviewPage() {
  <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
  <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Progress shows the share of tasks marked done.</p></section>
  <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Compare two primary sources">＋ Add reading task</button></div></section></div>
- <div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
+ ${overviewAnalytics()}<div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
 }
 
 function filteredTasks() {
@@ -286,64 +290,9 @@ function filteredTasks() {
   return arr;
 }
 
-let taskLayout = 'Board';
-const movingCards = new Set();
-
-function taskResults() {
-  const tasks = filteredTasks();
-  if (taskLayout === 'Table') return table(tasks);
-  return '<div style="display:grid;grid-template-columns:repeat(4,minmax(175px,1fr));gap:12px;overflow-x:auto;padding-bottom:8px">' +
-    statuses.map((status,index) => {
-      const rows = tasks.filter(t => t.status === status);
-      const color = ['#8793a5','#bf8641','#b36165','#318874'][index];
-      return `<section aria-label="${status}" data-lane="${status}" style="background:#f6f8f7;border-top:3px solid ${color};border-radius:8px;padding:10px;min-height:160px">
-        <h3 style="font-size:14px;margin:0 0 12px">${status} <small class="muted">${rows.length}</small></h3>
-        ${rows.map(t => `<article draggable="${!movingCards.has(t.id)}" data-card="${t.id}" class="card" style="padding:12px;margin-bottom:8px;display:grid;gap:8px">
-          <small class="muted">${esc(t.phase)}</small><button class="text-link" style="text-align:left" data-edit="${t.id}">${esc(t.title)}</button>
-          <small>${esc(t.assignee_name || 'Unassigned')} · ${esc(t.due_date || 'No due date')}</small>
-          <select class="field" aria-label="Move ${esc(t.title)}" data-move-card="${t.id}" ${movingCards.has(t.id)?'disabled':''}>${statuses.map(s => `<option ${s===status?'selected':''}>${s}</option>`).join('')}</select>
-        </article>`).join('')}
-      </section>`;
-    }).join('') + '</div>';
-}
-async function moveCard(id,status) {
-  const task = state.data.tasks.find(t=>t.id===id);
-  if (!task || task.status===status || movingCards.has(id) || !statuses.includes(status)) return;
-  const previous = task.status;
-  const workspace = state.workspace.id;
-  movingCards.add(id);
-  task.status=status;
-  render();
-  try {
-    await api('/tasks/'+id,{method:'PATCH',body:{status}});
-    toast('Moved to '+status);
-  } catch(error) {
-    task.status=previous;
-    toast(error.message,true);
-  } finally {
-    movingCards.delete(id);
-    if (state.workspace?.id===workspace) {
-      render();
-      await reload({quiet:true});
-    }
-  }
-}
-document.addEventListener('dragstart',e=>{
-  const card=e.target.closest('[data-card]');
-  if(card) e.dataTransfer.setData('application/x-researchflow-task',card.dataset.card);
-});
-document.addEventListener('dragover',e=>{
-  if(e.target.closest('[data-lane]') && e.dataTransfer.types.includes('application/x-researchflow-task')) e.preventDefault();
-});
-document.addEventListener('drop',e=>{
-  const lane=e.target.closest('[data-lane]');
-  if(!lane || !e.dataTransfer.types.includes('application/x-researchflow-task')) return;
-  e.preventDefault();
-  moveCard(Number(e.dataTransfer.getData('application/x-researchflow-task')),lane.dataset.lane);
-});
 function tasksPage() {
   const total = state.data.tasks.length;
-  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Organise reading, fieldwork, analysis and writing. Link each task to its sources.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span><div class="inline-actions">${['Board','Table'].map(v=>'<button class="tiny-btn" aria-pressed="'+(v===taskLayout)+'" data-layout="'+v+'">'+v+'</button>').join('')}</div></div><div id="task-table-target">${taskResults()}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
+  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Organise reading, fieldwork, analysis and writing. Link each task to its sources.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel">${boardTools()}<div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${boardContent()}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
 }
 
 function agentPage() {
@@ -832,6 +781,7 @@ function openTask(task = null) {
   const dlg = $('task-dialog');
   const f = $('task-form');
   f.reset();
+  f.dataset.revision=task?.revision || '';
   $('task-dialog-title').textContent = task && task.id ? 'Edit research task' : 'New research task';
   f.elements.id.value = task?.id || '';
   f.elements.title.value = task?.title || '';
@@ -856,7 +806,9 @@ function openTask(task = null) {
     `<option value="">Unassigned</option>` +
     state.data.members.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
   f.elements.assigneeId.value = task?.assignee_id || '';
+  if(task?.id) links.insertAdjacentHTML('beforeend',detailPanel(task));
   dlg.showModal();
+  connectLive();
 }
 
 async function createTask(form) {
@@ -867,6 +819,7 @@ async function createTask(form) {
       add: [...form.querySelectorAll('[data-source-id]:checked')].filter(i => i.dataset.original === 'false').map(i => Number(i.dataset.sourceId)),
       remove: [...form.querySelectorAll('[data-source-id]:not(:checked)')].filter(i => i.dataset.original === 'true').map(i => Number(i.dataset.sourceId))
     },
+    revision: id ? Number(form.dataset.revision) : undefined,
     title: data.title,
     description: data.description,
     phase: data.phase,
@@ -1109,13 +1062,12 @@ document.addEventListener('submit', async e => {
 document.addEventListener('click', async e => {
   const el = e.target.closest('button');
   if (!el) return;
-  if (el.dataset.layout) { taskLayout=el.dataset.layout; render(); return; }
   if (el.id === 'browse-files') { $('file-input').click(); return; }
   if (el.id === 'open-finder') {
     const finder = $('find-records');
     finder.showModal();
     $('find-query').value = '';
-    $('find-results').replaceChildren();
+    $('find-query').dispatchEvent(new Event('input',{bubbles:true}));
     $('find-query').focus();
     return;
   }
@@ -1339,7 +1291,7 @@ document.addEventListener('click', async e => {
 document.addEventListener('input', e => {
   if (e.target.id === 'task-search') {
     state.search = e.target.value;
-    $('task-table-target').innerHTML = taskResults();
+    $('task-table-target').innerHTML = boardContent();
     $('task-count').textContent = '(' + filteredTasks().length + ' of ' + state.data.tasks.length + ')';
   }
   if (e.target.id === 'lib-search') {
@@ -1352,7 +1304,6 @@ document.addEventListener('input', e => {
 
 document.addEventListener('change', async e => {
   const t = e.target;
-  if (t.dataset.moveCard) { await moveCard(Number(t.dataset.moveCard),t.value); return; }
   if (t.id === 'workspace-switcher') {
     if (t.value === '__new__') {
       const name = prompt('Enter a name for your new research workspace:');
@@ -1478,4 +1429,232 @@ drop.addEventListener('drop', e => {
   }
 });
 
+
+let boardView='Board', selectedTasks=new Set(), undoStack=[],redoStack=[],activeWorkspace=null;
+let live=null, liveKey='', liveTimer, busyMutation=false;
+const taskById=id=>state.data.tasks.find(t=>t.id===Number(id));
+const localDay=d=>new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+const today=()=>localDay(new Date());
+const dayMs=86400000;
+const shiftDate=(d,n)=>new Date(Date.parse(d+'T12:00:00Z')+n*dayMs).toISOString().slice(0,10);
+const options=vals=>vals.map(v=>'<option>'+esc(v)+'</option>').join('');
+function closeLive(){live?.close();live=null;liveKey='';clearTimeout(liveTimer);$('presence')?.replaceChildren();}
+function connectLive(){
+  if(!state.user||!state.workspace) return;
+  const w=state.workspace.id;
+  if(activeWorkspace!==w){
+    activeWorkspace=w; selectedTasks.clear(); undoStack=[];redoStack=[];state.messages=[];state.pendingActions=[];
+  }
+  const task=$('task-dialog').open && taskById($('task-form').elements.id.value);
+  const view=task?'Editing '+task.title:({tasks:'Task board',notes:'Research notebook',files:'Research library',activity:'Activity timeline',agent:'AI agent',overview:'Overview',team:'Team'}[state.page]);
+  const key=w+'|'+view;
+  if(key===liveKey)return;
+  closeLive();liveKey=key;
+  live=new EventSource('/api/live?'+new URLSearchParams({workspace:w,view}));
+  live.addEventListener('presence',e=>{
+    const peers=JSON.parse(e.data);
+    $('presence').textContent=peers.map(p=>p.name+' · '+p.view).join('  /  ');
+  });
+  live.onerror=()=>{$('presence').textContent='Reconnecting…';};
+  live.addEventListener('change',()=>{
+    clearTimeout(liveTimer);
+    liveTimer=setTimeout(()=>{
+      if(!busyMutation&&!state.busy&&!$('task-dialog').open&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&['tasks','overview','activity','team'].includes(state.page))reload({quiet:true});
+    },250);
+  });
+}
+$('task-dialog').addEventListener('close',connectLive);
+function pick(t){return '<input type="checkbox" aria-label="Select '+esc(t.title)+'" data-pick="'+t.id+'" '+(selectedTasks.has(t.id)?'checked':'')+'>';}
+function boardTools(){
+  return '<div class="rf-tools">'+['Board','Table','Schedule'].map(v=>'<button class="button secondary" aria-pressed="'+(boardView===v)+'" data-board="'+v+'">'+v+'</button>').join('')+
+    '<button class="button secondary" data-history="undo" '+(!undoStack.length?'disabled':'')+'>Undo</button><button class="button secondary" data-history="redo" '+(!redoStack.length?'disabled':'')+'>Redo</button><button class="button secondary" data-export="CSV">Export CSV</button></div><div id="bulk-tools">'+bulkTools()+'</div>';
+}
+function bulkTools(){
+  if(!selectedTasks.size)return '';
+  return '<div class="rf-tools"><strong>'+selectedTasks.size+' selected</strong><label>Action <select id="batch-kind">'+options(['Set status','Assign','Research phase','Shift dates'])+'</select></label><span id="batch-options">'+bulkOptions('Set status')+'</span><button class="button solid" data-batch>Apply</button><button class="tiny-btn" data-clear-picks>Clear</button></div>';
+}
+function bulkOptions(kind){
+  if(kind==='Shift dates')return '<input id="batch-value" aria-label="Shift by days" type="number" value="1" min="-3650" max="3650">';
+  return '<select aria-label="New value" id="batch-value">'+(kind==='Assign'?recordOptions(state.data.members,'name'):options(kind==='Research phase'?phases:statuses))+'</select>';
+}
+function boardContent(){
+  const rows=filteredTasks();
+  if(boardView==='Table')return table(rows);
+  if(boardView==='Schedule')return schedule(rows);
+  return '<div class="rf-board">'+statuses.map((s,i)=>{
+    const cards=rows.filter(t=>t.status===s),cap=state.data.limits?.find(l=>l.status===s)?.capacity;
+    return '<section class="rf-lane lane-'+i+'" data-lane="'+s+'"><header><strong>'+s+'</strong><button class="tiny-btn" data-limit="'+s+'" title="Set work-in-progress limit">'+cards.length+(cap?' / '+cap:' · ∞')+'</button></header>'+cards.map(t=>'<article draggable="true" data-drag="'+t.id+'" class="rf-card"><div>'+pick(t)+' <small>'+esc(t.phase)+'</small></div><button class="text-link" data-edit="'+t.id+'">'+esc(t.title)+'</button><small>'+esc(t.assignee_name||'Unassigned')+' · '+esc(t.due_date||'No due date')+'</small><select class="field" data-card-status="'+t.id+'" aria-label="Move '+esc(t.title)+'">'+statuses.map(v=>'<option '+(v===t.status?'selected':'')+'>'+v+'</option>').join('')+'</select></article>').join('')+'</section>';
+  }).join('')+'</div>';
+}
+function schedule(rows){
+  const dates=rows.flatMap(t=>[t.start_date,t.due_date]).filter(Boolean).sort();
+  const first=dates[0]||today(), last=dates.at(-1)||first;
+  const days=Math.max(7,Math.round((Date.parse(last)-Date.parse(first))/dayMs)+3);
+  return '<p>'+first+' — '+shiftDate(first,days-1)+'</p>'+rows.map(t=>{
+    const start=t.start_date||t.due_date,end=t.due_date||start;
+    const left=start?100*(Date.parse(start)-Date.parse(first))/dayMs/days:0;
+    const width=start?100*((Date.parse(end)-Date.parse(start))/dayMs+1)/days:0;
+    return '<div class="rf-schedule">'+pick(t)+'<button class="text-link" data-edit="'+t.id+'">'+esc(t.title)+'</button><div class="rf-track" data-days="'+days+'">'+(start?'<button class="rf-bar" data-bar="'+t.id+'" title="'+start+' to '+end+'" style="left:'+left+'%;width:'+width+'%"><span data-edge="start">‹</span><span data-edge="end">›</span></button>':'Unscheduled')+'</div><button class="tiny-btn" data-dates="'+t.id+'">Dates</button></div>';
+  }).join('');
+}
+function detailPanel(t){
+  const deps=state.data.dependencies||[], comments=(state.data.comments||[]).filter(c=>c.task_id===t.id), runs=(state.data.runs||[]).filter(r=>r.task_id===t.id);
+  const text=(label,key)=>'<label>'+label+'<input class="field" data-run-field="'+key+'"></label>';
+  return '<section class="rf-detail"><h3>Dependencies</h3>'+deps.filter(d=>d.successor===t.id).map(d=>'Blocked by '+recordLink('task',d.predecessor)+' <button type="button" data-unlink="'+d.predecessor+'">Remove</button>').join(' ')+deps.filter(d=>d.predecessor===t.id).map(d=>' Blocks '+recordLink('task',d.successor)).join(' ')+
+    '<label>Preceding task<select class="field" id="predecessor">'+recordOptions(state.data.tasks.filter(x=>x.id!==t.id),'title')+'</select></label><button type="button" class="tiny-btn" data-detail="dependency">Link dependency</button><h3>Discussion</h3>'+comments.map(c=>'<p><b>'+esc(c.name)+'</b> '+esc(c.body)+'</p>').join('')+'<textarea aria-label="Comment" class="field" id="new-comment"></textarea><button type="button" class="tiny-btn" data-detail="comment">Post comment</button>'+
+    (['Analytical','Numerical'].includes(t.phase)?'<details><summary>Experiment runs ('+runs.length+')</summary><div class="task-table-wrap"><table class="task-table"><tr>'+['Run','Parameters','Mesh','Time step','Solver','Convergence','Output'].map(x=>'<th>'+x+'</th>').join('')+'</tr>'+runs.map((r,i)=>'<tr>'+['label','parameters','mesh','time_step','solver_status','convergence'].map(k=>'<td class="'+(i&&runs[i-1][k]!==r[k]?'rf-diff':'')+'">'+esc(r[k])+'</td>').join('')+'<td>'+recordLink('file',r.output_id)+'</td></tr>').join('')+'</table></div><div class="form-grid">'+[['Run name','label'],['Parameters','parameters'],['Mesh','mesh'],['Time step','timeStep'],['Solver status','status'],['Convergence','convergence']].map(a=>text(...a)).join('')+'<label>Output<select id="run-output">'+recordOptions(state.data.files,'original_name')+'</select></label></div><button type="button" class="tiny-btn" data-detail="run">Log run</button></details>':'')+
+    '<h3>Ask the research agent</h3>'+['Propose subtasks','Summarize discussion','Draft a literature review paragraph','Detect conflicting findings'].map(a=>'<button type="button" class="tiny-btn" data-task-ai="'+esc(a)+'">'+esc(a)+'</button>').join(' ')+'</section>';
+}
+async function batch(items,history='normal'){
+  if(busyMutation||!items.length)return;
+  busyMutation=true;
+  const inverse=[], keys={dueDate:'due_date',startDate:'start_date',assigneeId:'assignee_id'};
+  try {
+    for(const i of items){
+      const t=taskById(i.id);
+      if(!t||t.revision!==i.revision)throw Error('Task changed. Review its current version.');
+      const before={};
+      for(const [field,value] of Object.entries(i.changes)){
+        const key=keys[field]||field;
+        before[field]=t[key]??null;t[key]=value;
+      }
+      inverse.push({id:t.id,changes:before});
+    }
+    render();
+    const saved=await api('/board/batch',{method:'POST',body:{items}});
+    inverse.forEach((i,n)=>i.revision=saved[n].revision);
+    // Rebase the next local history entry only after a successful revision check.
+    const pending=history==='undo'?undoStack.slice(0,-1):history==='redo'?redoStack.slice(0,-1):[];
+    for(const row of saved){
+      const next=pending.flat().findLast(entry=>entry.id===row.id);
+      if(next)next.revision=row.revision;
+    }
+    if(history==='undo'){undoStack.pop();redoStack.push(inverse);}
+    else {if(history==='redo')redoStack.pop();else redoStack=[];undoStack.push(inverse);}
+    toast(history==='undo'?'Change undone':'Changes saved');
+  }catch(e){
+    for(const i of inverse)for(const [k,v] of Object.entries(i.changes))taskById(i.id)[keys[k]||k]=v;
+    toast(e.message,true);
+  }finally{render();await reload({quiet:true});busyMutation=false;}
+}
+const changeItem=(t,changes)=>({id:t.id,revision:t.revision,changes});
+document.addEventListener('dragstart',e=>{const card=e.target.closest('[data-drag]');if(card)e.dataTransfer.setData('text/task',card.dataset.drag);});
+document.addEventListener('dragover',e=>{if(e.target.closest('[data-lane]'))e.preventDefault();});
+document.addEventListener('drop',e=>{
+  const lane=e.target.closest('[data-lane]');if(!lane)return;
+  e.preventDefault();const t=taskById(e.dataTransfer.getData('text/task'));
+  if(t&&t.status!==lane.dataset.lane)batch([changeItem(t,{status:lane.dataset.lane})]);
+});
+document.addEventListener('pointerdown',e=>{
+  const bar=e.target.closest('[data-bar]');if(!bar)return;
+  const x=e.clientX,track=bar.parentElement,edge=e.target.dataset.edge,t=taskById(bar.dataset.bar);
+  bar.setPointerCapture(e.pointerId);
+  bar.onpointermove=ev=>{bar.style.transform='translateX('+(ev.clientX-x)+'px)';};
+  bar.onpointercancel=()=>{bar.style.transform='';bar.onpointermove=null;};
+  bar.onpointerup=ev=>{
+    bar.onpointermove=null;bar.style.transform='';
+    const days=Math.round((ev.clientX-x)/track.clientWidth*Number(track.dataset.days));
+    if(!days)return;
+    const start=t.start_date||t.due_date,end=t.due_date||start;
+    batch([changeItem(t,{startDate:shiftDate(start,edge==='end'?0:days),dueDate:shiftDate(end,edge==='start'?0:days)})]);
+  };
+});
+function downloadText(filename,body,type){
+  const url=URL.createObjectURL(new Blob([body],{type}));
+  const a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function exportReport(format){
+  const rows=state.page==='tasks'?filteredTasks().filter(t=>!selectedTasks.size||selectedTasks.has(t.id)):state.data.tasks;
+  if(format==='PDF'){window.print();return;}
+  if(format==='BibTeX'){downloadText('references.bib',state.data.files.map(buildBibtexFallback).join('\n\n'),'text/plain');return;}
+  if(format==='Markdown'){downloadText('research-report.md','# '+state.workspace.name+'\n\n'+rows.map(t=>'- ['+(t.status==='Done'?'x':' ')+'] '+t.title+' — '+t.phase+' · '+t.status+' · '+(t.due_date||'Unscheduled')).join('\n'),'text/markdown');return;}
+  const cell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replaceAll('"','""')+'"';
+  downloadText('research-tasks.csv',[['Title','Phase','Status','Assignee','Due'],...rows.map(t=>[t.title,t.phase,t.status,t.assignee_name,t.due_date])].map(row=>row.map(cell).join(',')).join('\r\n'),'text/csv');
+}
+function overviewAnalytics(){
+  const rows=state.data.tasks;
+  const bar=(label,list,attr)=>'<button class="rf-metric" '+attr+'><b>'+esc(label)+'</b><span class="rf-stack">'+statuses.map((s,i)=>'<i class="lane-'+i+'" style="width:'+(100*list.filter(t=>t.status===s).length/list.length)+'%"></i>').join('')+'</span><span>'+list.filter(t=>t.status==='Done').length+'/'+list.length+' done</span></button>';
+  return '<section class="card panel section-spacer"><h2>Research progress</h2>'+phases.filter(p=>rows.some(t=>t.phase===p)).map(p=>bar(p,rows.filter(t=>t.phase===p),'data-phase-drill="'+esc(p)+'"')).join('')+'<h3>Team workload</h3>'+state.data.members.map(m=>'<button class="tiny-btn" data-workload="'+m.id+'">'+esc(m.name)+' · '+rows.filter(t=>t.assignee_id===m.id&&t.status!=='Done').length+' open</button>').join(' ')+'<details><summary>Relationship graph</summary>'+graphView()+'</details><div class="rf-tools">'+['Markdown','CSV','PDF','BibTeX'].map(f=>'<button class="tiny-btn" data-export="'+f+'">'+f+'</button>').join('')+'</div></section>';
+}
+function graphView(){
+  const {tasks,files,notes,runs=[],dependencies=[]}=state.data;
+  const groups=[tasks.map(t=>['task',t.id,t.title]),files.map(f=>['file',f.id,f.original_name]),notes.map(n=>['note',n.id,n.body]),runs.map(r=>['run',r.id,r.label,r.task_id])];
+  const points=new Map(),edges=[];
+  groups.forEach((nodes,i)=>nodes.forEach(([kind,id],j)=>points.set(kind+id,[95+i*190,30+j*56])));
+  function edge(a,b){const from=points.get(a),to=points.get(b);if(from&&to)edges.push('<path d="M'+from.join(' ')+' Q'+(from[0]+50)+' '+((from[1]+to[1])/2)+' '+to.join(' ')+'"/>');}
+  tasks.forEach(t=>t.source_ids?.forEach(id=>edge('task'+t.id,'file'+id)));
+  notes.forEach(n=>{edge('note'+n.id,'task'+n.task_id);edge('note'+n.id,'file'+n.source_id);});
+  runs.forEach(r=>{edge('run'+r.id,'task'+r.task_id);edge('run'+r.id,'file'+r.output_id);});
+  dependencies.forEach(d=>edge('task'+d.predecessor,'task'+d.successor));
+  const h=Math.max(1,...groups.map(g=>g.length))*56+12;
+  return '<div class="rf-graph"><div style="width:760px;height:'+h+'px"><svg aria-hidden="true" width="760" height="'+h+'">'+edges.join('')+'</svg>'+groups.flat().map(([kind,id,label,parent])=>{
+    const [x,y]=points.get(kind+id);
+    return '<button class="tiny-btn" data-record="'+(parent?'task':kind)+'" data-record-id="'+(parent||id)+'" title="'+esc(label)+'" style="left:'+(x-73)+'px;top:'+(y-15)+'px">'+kind+' · '+esc(label.slice(0,40))+'</button>';
+  }).join('')+'</div></div>';
+}
+document.addEventListener('change',e=>{
+  if(e.target.dataset.cardStatus){const t=taskById(e.target.dataset.cardStatus);if(t)batch([changeItem(t,{status:e.target.value})]);}
+  if(e.target.dataset.pick){const id=Number(e.target.dataset.pick);if(e.target.checked)selectedTasks.add(id);else selectedTasks.delete(id);$('bulk-tools').innerHTML=bulkTools();}
+  if(e.target.id==='batch-kind')$('batch-options').innerHTML=bulkOptions(e.target.value);
+});
+document.addEventListener('click',async e=>{
+  const el=e.target.closest('button');if(!el)return;
+  const d=el.dataset;
+  try{
+    if(d.board){boardView=d.board;render();}
+    if(d.export)exportReport(d.export);
+    if(d.clearPicks!==undefined){selectedTasks.clear();render();}
+    if(d.limit){const input=prompt('Maximum tasks in '+d.limit+' (0 for unlimited)',state.data.limits.find(l=>l.status===d.limit)?.capacity||0);if(input!==null){await api('/board/limit',{method:'POST',body:{status:d.limit,capacity:Number(input)}});await reload();}}
+    if(d.batch!==undefined){
+      const kind=$('batch-kind').value,val=$('batch-value').value;
+      const items=state.data.tasks.filter(t=>selectedTasks.has(t.id)).map(t=>{
+        if(kind==='Shift dates'){
+          if(!Number.isInteger(Number(val))||Math.abs(val)>3650)throw Error('Enter a whole number of days within 3650');
+          if(!t.due_date)throw Error('Set a due date for '+t.title+' before shifting it');
+          return changeItem(t,{dueDate:shiftDate(t.due_date,Number(val)),startDate:t.start_date?shiftDate(t.start_date,Number(val)):null});
+        }
+        return changeItem(t,kind==='Assign'?{assigneeId:Number(val)||null}:kind==='Research phase'?{phase:val}:{status:val});
+      });await batch(items);
+    }
+    if(d.history){const items=(d.history==='undo'?undoStack:redoStack).at(-1);if(items)await batch(items,d.history);}
+    if(d.dates){const t=taskById(d.dates),start=prompt('Start date (YYYY-MM-DD)',t.start_date||t.due_date||today());if(!start)return;const end=prompt('Due date (YYYY-MM-DD)',t.due_date||start);if(end)await batch([changeItem(t,{startDate:start,dueDate:end})]);}
+    if(d.detail||d.unlink){
+      const id=Number($('task-form').elements.id.value),kind=d.detail||'unlink',body={kind};
+      if(kind==='dependency'||kind==='unlink')body.predecessor=Number(d.unlink||$('predecessor').value);
+      if(kind==='comment')body.body=$('new-comment').value;
+      if(kind==='run'){document.querySelectorAll('[data-run-field]').forEach(f=>body[f.dataset.runField]=f.value);body.outputId=Number($('run-output').value)||null;}
+      await api('/tasks/'+id+'/detail',{method:'POST',body});await reload();
+      document.querySelector('.rf-detail').outerHTML=detailPanel(taskById(id));toast('Saved');
+    }
+    if(d.taskAi){const t=taskById($('task-form').elements.id.value);$('task-dialog').close();goto('agent');await handleAgent(d.taskAi+' for task '+t.id+' “'+t.title+'” using its linked records.');}
+    if(d.phaseDrill||d.workload){state.filter='All';state.phaseFilter=d.phaseDrill||'All';state.search=d.workload?state.data.members.find(m=>m.id===Number(d.workload)).name:'';goto('tasks');}
+    if(d.command){$('find-records').close();if(d.command==='create')openTask();else goto(d.command);}
+  }catch(error){toast(error.message,true);}
+});
+document.addEventListener('input',e=>{
+  if(e.target.id!=='find-query')return;
+  const term=e.target.value.toLowerCase();
+  const commands={create:'Create a task',overview:'Overview',tasks:'Task board',files:'Research library',notes:'Research notebook',agent:'Ask the AI research agent',activity:'Activity timeline',team:'Team'};
+  $('find-results').insertAdjacentHTML('afterbegin',Object.entries(commands).filter(([,v])=>v.toLowerCase().includes(term)).map(([k,v])=>'<button class="tiny-btn" data-command="'+k+'">'+v+'</button>').join(' '));
+});
+document.addEventListener('keydown',e=>{
+  if(!state.user)return;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'&&!$('task-dialog').open){e.preventDefault();$('open-finder').click();}
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!document.querySelector('dialog[open]')&&!e.target.closest('input,select,textarea,[contenteditable]')){
+    const items=(e.shiftKey?redoStack:undoStack).at(-1);
+    if(items){e.preventDefault();batch(items,e.shiftKey?'redo':'undo');}
+  }
+  if($('find-records').open&&['ArrowDown','ArrowUp','Enter'].includes(e.key)){
+    const list=[...$('find-results').querySelectorAll('button')];if(!list.length)return;
+    const idx=list.indexOf(document.activeElement);
+    if(e.key==='Enter'&&idx===-1){e.preventDefault();list[0].click();}
+    if(e.key!=='Enter'){e.preventDefault();list[(idx+(e.key==='ArrowDown'?1:-1)+list.length)%list.length].focus();}
+  }
+});
+const boardStyles=document.createElement('style');
+boardStyles.textContent=".rf-tools,.rf-lane header,.rf-schedule,.rf-metric{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}.rf-tools{margin:0 0 1rem}.rf-tools [aria-pressed=true]{background:#243c38;color:white}.rf-board{display:grid;grid-template-columns:repeat(4,minmax(165px,1fr));gap:12px;overflow:auto;padding-bottom:8px}.rf-lane{background:#f5f7f6;border-radius:10px;border-top:3px solid var(--lane);padding:10px;min-height:180px}.lane-0{--lane:#8793a5}.lane-1{--lane:#c88b3c}.lane-2{--lane:#c16a6a}.lane-3{--lane:#389480}.rf-lane header{justify-content:space-between;margin-bottom:12px}.rf-card{display:grid;gap:10px;background:white;border:1px solid #d8dfdb;border-radius:8px;padding:12px;margin:8px 0;cursor:grab}.rf-card button{text-align:left}.rf-card small,.rf-presence{color:#47665c}.rf-presence{max-width:23vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem}.rf-detail{display:grid;gap:8px}.rf-detail h3{margin:12px 0 0}.rf-diff{background:#fcf1cb}.rf-schedule{flex-wrap:nowrap;padding:8px;border-bottom:1px solid #ddd}.rf-schedule>.text-link{width:20%;text-align:left}.rf-track{position:relative;height:32px;flex:1;background:#edf2ef;border-radius:5px}.rf-bar{position:absolute;top:3px;height:26px;min-width:20px;border:0;border-radius:5px;background:#35776c;color:white;display:flex;justify-content:space-between;align-items:center;touch-action:none;cursor:grab}.rf-bar span{cursor:ew-resize}.rf-metric{width:100%;background:none;border:0;padding:8px;text-align:left}.rf-metric b{width:130px}.rf-stack{display:flex;flex:1;height:10px;overflow:hidden;border-radius:5px}.rf-stack i{background:var(--lane)}.rf-graph{overflow:auto;max-height:480px}.rf-graph>div{position:relative}.rf-graph svg{position:absolute;inset:0;stroke:#89a89c;fill:none}.rf-graph button{position:absolute;width:146px;height:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:white}.rf-detail table{font-size:.8rem}#task-dialog{max-height:94dvh;overflow:auto}button:focus-visible,input:focus-visible{outline:3px solid #24847a;outline-offset:2px}@media print{.sidebar,.topbar,.mobile-nav,.rf-tools,.agent-feature{display:none!important}.app-area{margin:0!important}}@media(max-width:700px){.rf-presence{max-width:22vw}.rf-board{grid-template-columns:repeat(4,75vw)}#task-dialog{width:100%;max-width:100%;margin:auto 0 0;max-height:95dvh}}\n";
+document.head.append(boardStyles);
+const presenceLabel=document.createElement('span');
+presenceLabel.id='presence';presenceLabel.className='rf-presence';
+$('sync-status').before(presenceLabel);
 boot();
