@@ -2088,10 +2088,13 @@ function labRegression(points,method){
     const ci=Number.isFinite(t*se)?' ['+labFmt(estimate-t*se)+', '+labFmt(estimate+t*se)+']':'';
     stats.push([['Intercept','Slope','Quadratic coefficient','Cubic coefficient'][i],labFmt(estimate)+ci]);
   }
-  return {p,predict,residual,stats};
+  const coefficients=c.map((_,i)=>labSum(c.map((v,j)=>j<i?0:v*choose[j][i]*(-center)**(j-i)/scale**j)));
+  const predictor=logX?'ln(X)':'X';
+  const equation=(logY?'ln(Y)':'Y')+' = '+labFmt(coefficients[0])+coefficients.slice(1).map((v,i)=>(v<0?' − ':' + ')+labFmt(Math.abs(v))+'·'+predictor+(['','²','³'][i]||'')).join('');
+  return {p,predict,residual,stats,equation};
 }
 function labCompute(a,d){
-  const info={used:new Set(),series:[],results:[],issues:[],message:'',categorical:false,labels:[],xname:d.headers[a.x],yname:d.headers[a.y]};
+  const info={highlights:[],used:new Set(),series:[],results:[],issues:[],message:'',categorical:false,labels:[],xname:d.headers[a.x],yname:d.headers[a.y]};
   const numeric=(row,c)=>{if(a.types[c]==='Text')return NaN;const s=String(row[c]??'').trim();return labNum(a.types[c]==='Number (grouped)'&&/^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)?s.replaceAll(',',''):s);};
   const add=(key,rows)=>info.results.push(...rows.map(([metric,value])=>[key,metric,value]));
   const issue=(i,s)=>info.issues.push([i+2,s]);
@@ -2112,6 +2115,7 @@ function labCompute(a,d){
       const den=a.frequency==='Per 10,000 words'?denoms.get(g):totals.get(g);
       const points=[];
       info.labels.forEach((c,i)=>{const n=m.get(c)||0;const v=a.frequency==='Counts'?n:a.frequency==='Within-group %'?100*n/den:invalid.has(g)?NaN:10000*n/den;
+        if(n&&Number.isFinite(v))info.highlights.push(c+' in '+g+' occurs '+n+' '+(n===1?'time':'times')+(a.frequency==='Per 10,000 words'?' in '+den.toLocaleString()+' words, or '+labFmt(v)+' per 10,000 words.':a.frequency==='Within-group %'?' among '+den+' coded occurrences ('+labFmt(v)+'%).':' among '+den+' coded occurrences.'));
         add(g,[[c,labFmt(v)+' · count '+n+' / '+den+(a.frequency==='Per 10,000 words'?' words':' coded rows')]]);if(Number.isFinite(v))points.push([i,v]);});
       info.series.push({key:g,points,kind:'bar'});
     }
@@ -2137,29 +2141,31 @@ function labCompute(a,d){
     info.xname=d.headers[a.y];info.yname='Frequency';info.categorical=true;
     info.labels=Array.from({length:bins},(_,i)=>labFmt(min+i*step)+'–'+labFmt(min+(i+1)*step));
     for(const [key,p] of groups){const v=p.map(r=>r[1]),s=labSummary(v),counts=Array(bins).fill(0);v.forEach(z=>counts[Math.min(bins-1,Math.floor((z-min)/step))]++);
-      info.series.push({key,kind:'bar',points:counts.map((n,i)=>[i,n])});add(key,[['N',s.n],['Mean',s.mean],['Sample SD',s.sd],['Median',s.median],['Q1',s.q1],['Q3',s.q3],['Minimum',s.min],['Maximum',s.max]].map(([k,v])=>[k,labFmt(v)]));}
+      info.highlights.push(key+' · median = '+labFmt(s.median)+' · interquartile range '+labFmt(s.q1)+' to '+labFmt(s.q3)+' · n = '+s.n);info.series.push({key,kind:'bar',points:counts.map((n,i)=>[i,n])});add(key,[['N',s.n],['Mean',s.mean],['Sample SD',s.sd],['Median',s.median],['Q1',s.q1],['Q3',s.q3],['Minimum',s.min],['Maximum',s.max]].map(([k,v])=>[k,labFmt(v)]));}
     return info;
   }
   for(const [key,p] of groups){
     if(a.mode===labModes[2]){
       const s=labSummary(p.map(t=>t[1])),err=a.error==='SD'?s.sd:a.error==='SE'?s.se:labTCrit(s.n-1)*s.se;
-      summaries.set(key,s);info.categorical=true;info.xname=+a.group>=0?d.headers[a.group]:'Group';
+      info.highlights.push(key+' · mean = '+labFmt(s.mean)+' across '+s.n+' observations.');summaries.set(key,s);info.categorical=true;info.xname=+a.group>=0?d.headers[a.group]:'Group';
       info.series.push({key,kind:'mean',points:[[info.labels.length,s.mean]],error:err});info.labels.push(key);
       add(key,[['N',s.n],['Mean',labFmt(s.mean)],[a.error,labFmt(err)]]);continue;
     }
     if(a.mode===labModes[1]){
       const delta=p.map(([measured,pred])=>pred-measured);
+      info.highlights.push(key+' · '+p.length+' matched observations · RMSE = '+labFmt(Math.sqrt(labMean(delta.map(v=>v*v))))+' · MAE = '+labFmt(labMean(delta.map(Math.abs))));
       add(key,[['Matched rows',p.length],['RMSE',labFmt(Math.sqrt(labMean(delta.map(v=>v*v))))],['MAE',labFmt(labMean(delta.map(Math.abs)))],['Mean bias (prediction − measurement)',labFmt(labMean(delta))]]);
       info.series.push({key,points:p,kind:'Scatter',identity:true});info.message='Each row must contain a matched measurement (X) and prediction (Y). The dashed diagonal marks exact agreement.';continue;
     }
     if(a.mode===labModes[3]){
       const x=p.map(t=>t[0]),y=p.map(t=>t[1]),r=labCorrelation(x,y),z=Math.atanh(r),delta=1.96/Math.sqrt(p.length-3);
+      info.highlights.push(key+' · Pearson r = '+labFmt(r)+' across '+p.length+' complete pairs.');
       add(key,[['Complete pairs',p.length],['Pearson r',labFmt(r)],['Pearson 95% CI (Fisher z)',p.length>3?labFmt(Math.tanh(z-delta))+' to '+labFmt(Math.tanh(z+delta)):'—'],['Spearman ρ (average ranks)',labFmt(labCorrelation(labRank(x),labRank(y)))]]);
       info.series.push({key,points:p,kind:'Scatter'});info.message='Pearson measures linear association. Spearman measures monotonic association. The Pearson interval assumes independent pairs and approximate bivariate normality.';continue;
     }
     const series={key,points:p,kind:a.type};info.series.push(series);
     try{
-      const model=labRegression(p,a.method);add(key,model.stats);
+      const model=labRegression(p,a.method);add(key,model.stats);const report=Object.fromEntries(model.stats);info.highlights.push(key+' · '+model.equation+' · n = '+model.p.length+' · R² = '+report['R² (original Y)']+' · RMSE = '+report.RMSE);
       model.p.forEach(t=>info.used.add(t[2]));const eligible=new Set(model.p);p.forEach(t=>{if(!eligible.has(t))issue(t[2],'Outside '+a.method+' model domain');});
       if(a.type==='Residuals'){series.points=model.residual;info.yname='Residual (observed − fitted)';}
       else if(a.fit){const xs=model.p.map(t=>t[0]),lo=Math.min(...xs),hi=Math.max(...xs);series.curve=Array.from({length:101},(_,i)=>{const x=lo+(hi-lo)*i/100;return [x,model.predict(x)];});}
@@ -2328,7 +2334,7 @@ function analysisPage(){
     '<section class="card panel lab-chart"><h2>Figure</h2><div id="lab-plot"></div><div id="lab-coverage" class="small-text"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
     '<details class="card panel lab-settings"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
     ['xmin','xmax','ymin','ymax','xtick','ytick'].map((k,i)=>input(k,['X minimum','X maximum','Y minimum','Y maximum','X tick interval','Y tick interval'][i],'number','step="any" placeholder="Automatic"')).join('')+check('logx','Log X')+check('logy','Log Y')+check('gray','Grayscale')+check('grid','Gridlines')+(trend?check('fit','Show fitted curves'):'')+'</div><p class="small-text">Log tick intervals are in powers of ten. Category axes use the dataset order.</p><div id="lab-styles"></div></details>'+
-    '<section class="card panel lab-output"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-results"></div></section>'+
+    '<section class="card panel lab-output"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-headline" aria-live="polite"></div><details><summary>Detailed results and coefficients</summary><div id="lab-results"></div></details></section>'+
     (write?'<section class="card panel lab-notebook"><h2>Research notebook</h2>'+input('caption','Figure caption')+button('notebook','Save figure and results to notebook')+'</section>':'')+'</div>';
 }
 function labQuality(a,d,m){
@@ -2345,6 +2351,7 @@ function drawAnalysis(){
   labChoosePane(labPanes.get(a)||'Figure');
   $('lab-plot').querySelectorAll('[data-axis-edit],[data-legend-edit]').forEach(t=>{t.setAttribute('tabindex','0');t.setAttribute('role','button');t.setAttribute('aria-label','Edit '+(t.dataset.axisEdit||'legend')+' · '+t.textContent);});
   $('lab-method').textContent=m.message+(m.labels.length>30?' Figure displays the first 30 categories. All categories are in the results export.':'')+(a.logx||a.logy?' Log axes display positive values only.':'');
+  $('lab-headline').innerHTML=m.highlights.length?'<p><strong>'+esc(m.highlights[0])+'</strong></p>'+(m.highlights.length>1?'<details><summary>More results</summary>'+m.highlights.slice(1,30).map(v=>'<p>'+esc(v)+'</p>').join('')+'</details>':''):'<p>See the detailed results and row checks for this selection.</p>';
   $('lab-results').innerHTML=labTable(['Series / group','Measure','Result'],m.results.slice(0,250))+(m.results.length>250?'<p>First 250 entries shown. Download the full table above.</p>':'');
   const excluded=d.rows.length-m.used.size;
   const warnings=new Set(m.issues.map(r=>r[0]));
