@@ -2009,11 +2009,14 @@ const labSum = a => a.reduce((s,x)=>s+x,0);
 const labCsv = rows => rows.map(row=>row.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(',')).join('\n');
 function labDefault(){
   return {csv:'Load (kN),Measured (mm),Predicted (mm)\n10,0.72,0.68\n20,1.46,1.38\n30,2.04,2.12\n40,2.93,2.81\n50,3.35,3.51\n60,4.28,4.21',name:'Load–displacement study',source:'Example dataset',sourceId:0,
-    mode:labModes[0],method:'Linear',type:'Scatter',x:0,y:1,more:[],group:-1,word:-1,category:0,frequency:'Counts',title:'Load–displacement response',xlabel:'',ylabel:'',font:'Arial',size:11,width:170,height:105,xmin:'',xmax:'',ymin:'',ymax:'',xtick:'',ytick:'',logx:false,logy:false,grid:true,gray:false,fit:true,error:'95% CI',styles:{},types:{},units:{},caption:'',groupA:'',groupB:''};
+    mode:labModes[0],method:'Linear',type:'Scatter',x:0,y:1,more:[],group:-1,word:-1,category:0,frequency:'Counts',title:'Load–displacement response',xlabel:'',ylabel:'',font:'Arial',size:11,width:170,height:105,xmin:'',xmax:'',ymin:'',ymax:'',xtick:'',ytick:'',logx:false,logy:false,grid:true,gray:false,fit:true,error:'95% CI',styles:{},types:{},units:{},caption:'',versionNote:'',groupA:'',groupB:''};
 }
 function analysisDraft(){
   const key=JSON.stringify([state.user.id,state.workspace?.id]);
-  if(!labDrafts.has(key))labDrafts.set(key,labDefault());
+  if(!labDrafts.has(key)){
+    const a=labDefault();labDrafts.set(key,a);
+    try{const raw=localStorage.getItem('rf.analysis.draft.'+key);if(raw){const item=JSON.parse(raw);analysisRows(item.settings.csv);Object.assign(a,item.settings);labStatus.set(a,item.status);labHasLocal.add(a);}}catch{}
+  }
   return labDrafts.get(key);
 }
 function labSummary(values){
@@ -2244,6 +2247,31 @@ const labSaved=f=>/\.analysis\.txt$/i.test(f.original_name);
 const labSource=f=>/\.(csv|tsv|xlsx)$/i.test(f.original_name);
 function labFileButton(f){return labSource(f)||labSaved(f)?'<button class="tiny-btn" data-lab-file="'+Number(f.id)+'">Open in Data analysis</button>':'';}
 let labWorkbook=null;
+const labStatus=new WeakMap(),labHasLocal=new WeakSet(),labTimers=new WeakMap();
+const labLocalKey=()=> 'rf.analysis.draft.'+JSON.stringify([state.user.id,state.workspace?.id]);
+function labShowStatus(a,status){
+  labStatus.set(a,status);
+  if(state.user&&analysisDraft()===a&&$('lab-save-status'))$('lab-save-status').textContent=status;
+}
+function labPersist(a,status='Draft saved on this device',key=labLocalKey()){
+  clearTimeout(labTimers.get(a));
+  try{localStorage.setItem(key,JSON.stringify({settings:a,status}));labHasLocal.add(a);labShowStatus(a,status);}
+  catch{labShowStatus(a,status.startsWith('Version saved')?status:'Unsaved changes · device storage unavailable');}
+}
+function labDirty(a){
+  const key=labLocalKey();labShowStatus(a,'Unsaved changes');clearTimeout(labTimers.get(a));
+  labTimers.set(a,setTimeout(()=>labPersist(a,'Draft saved on this device',key),350));
+}
+function labVersionOptions(){
+  const groups=new Map(),labels=new Map();
+  for(const f of state.data.files.filter(labSaved).slice().sort((a,b)=>Number(a.id)-Number(b.id))){
+    const stem=f.original_name.replace(/\.analysis\.txt$/i,''),match=stem.match(/^(.*?) (\d{4}-\d\d-\d\d)T(\d\d)-(\d\d)-(\d\d)-(\d{3})Z(?: -- (.*))?$/);
+    const title=match?match[1]:stem,n=(groups.get(title)||0)+1;groups.set(title,n);
+    const time=match?new Date(match[2]+'T'+match[3]+':'+match[4]+':'+match[5]+'Z'):new Date(f.created_at);
+    labels.set(f.id,title+' · Version '+n+(isNaN(time)?'':' · '+time.toLocaleString(undefined,{day:'numeric',month:'short',hour:'numeric',minute:'2-digit'}))+(match?.[7]?' · '+match[7]:''));
+  }
+  return [...labels].reverse();
+}
 const labEntry = new WeakMap();
 function labStart(a){
   const path=labEntry.get(a)||'home';
@@ -2251,14 +2279,15 @@ function labStart(a){
   const opts=(list,first)=>labOptions([['',first],...list.map(f=>[f.id,f.original_name])],'');
   let panel=labEntry.has(a)?btn('work','Return to current analysis'):'';
   if(path==='open')panel+='<section class="card panel"><h2>Open dataset</h2><div class="lab-fields"><label>From the research library<select class="field" id="lab-source">'+opts(state.data.files.filter(labSource),'Choose a dataset…')+'</select></label><label>Upload CSV, TSV or Excel<input type="file" id="lab-upload" accept=".csv,.tsv,.xlsx,.txt"></label></div><details><summary>Paste data</summary><textarea class="field" id="lab-csv" rows="6" aria-label="Delimited dataset">'+esc(a.pending||'')+'</textarea><button class="button solid" data-lab-action="apply">Use pasted data</button></details></section>';
-  if(path==='resume')panel+='<section class="card panel"><h2>Resume analysis</h2><label>Saved analyses<select class="field" id="lab-saved">'+opts(state.data.files.filter(labSaved),'Choose a saved version…')+'</select></label></section>';
+  if(labHasLocal.has(a))panel+=btn('work','Continue device draft');
+  if(path==='resume')panel+='<section class="card panel"><h2>Resume analysis</h2><label>Saved analyses<select class="field" id="lab-saved">'+labOptions([['','Choose a saved version…'],...labVersionOptions()],'')+'</select></label></section>';
   if(path==='examples')panel+='<section class="card panel"><h2>Choose an example</h2><div class="rf-tools">'+btn('numeric','Numerical research')+'<button class="button secondary" data-lab-action="human">Humanities research</button></div></section>';
   return pageHeading('RESEARCH METHODS','Data analysis','Choose a dataset or continue an existing analysis.')+'<div id="analysis-lab"><section class="card panel"><div class="rf-tools">'+btn('open','Open dataset')+btn('resume','Resume analysis')+btn('examples','Try an example')+'</div></section>'+panel+'</div>';
 }
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-start]');if(!b)return;
   const a=analysisDraft(),choice=b.dataset.start;
-  if(choice==='numeric'){Object.assign(a,labDefault());delete a.pending;labWorkbook=null;}
+  if(choice==='numeric'){Object.assign(a,labDefault());labDirty(a);delete a.pending;labWorkbook=null;}
   labEntry.set(a,choice==='numeric'?'work':choice);render();
 });
 function analysisPage(){
@@ -2271,7 +2300,7 @@ function analysisPage(){
   const files=state.data.files, saved=files.filter(labSaved),source=files.filter(labSource),write=state.workspace?.role!=='viewer',human=a.mode===labModes[5],trend=a.mode===labModes[0];
   const uniqueGroups=+a.group>=0?[...new Set(d.rows.map(r=>r[a.group]).filter(Boolean))]:[];
   return pageHeading('RESEARCH METHODS','Data analysis','Prepare a dataset, compare evidence, and save reproducible figures.')+
-    '<div id="analysis-lab" class="lab-editor" data-pane="'+(labPanes.get(a)||'Figure')+'"><nav aria-label="Analysis panels" class="lab-tabs">'+['Data','Figure','Results'].map(v=>'<button class="tiny-btn" data-pane-choice="'+v+'">'+v+'</button>').join('')+'</nav><section class="card panel lab-data"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+
+    '<div id="analysis-lab" class="lab-editor" data-pane="'+(labPanes.get(a)||'Figure')+'"><nav aria-label="Analysis panels" class="lab-tabs">'+['Data','Figure','Results'].map(v=>'<button class="tiny-btn" data-pane-choice="'+v+'">'+v+'</button>').join('')+'</nav><section class="card panel lab-data"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+'<span id="lab-save-status" role="status">'+esc(labStatus.get(a)||'Unsaved changes')+'</span>'+input('versionNote','Version note (optional)')+
     '</div><div class="rf-tools"><button class="tiny-btn" data-start="open">Change dataset</button><button class="tiny-btn" data-start="resume">Open saved version</button>'+(write?button('save','Save version'):'')+button('duplicate','Duplicate analysis')+
     (a.sourceId?'<button class="tiny-btn" data-preview="'+Number(a.sourceId)+'">View source record</button>':'')+'</div><details><summary>Paste or edit data</summary><textarea id="lab-csv" class="field" rows="6" aria-label="Delimited dataset">'+esc(a.pending??a.csv)+'</textarea>'+button('apply','Apply data')+'</details>'+
     (labWorkbook?.owner===a?'<div class="lab-fields"><label>Excel sheet<select id="lab-sheet" class="field">'+labOptions(labWorkbook.sheets.map((s,i)=>[i,s.name]),labWorkbook.index)+'</select></label><label>Header row<input class="field" id="lab-header" type="number" min="1" value="'+labWorkbook.header+'"></label>'+button('sheet','Use sheet and header')+'</div>':'')+
@@ -2349,7 +2378,7 @@ async function labReadExcel(file){
 function labLoadData(text,name,sourceId=0){
   if(text.length>8e6)throw Error('Select a dataset under 8 MB.');
   const d=analysisRows(text),a=analysisDraft();Object.assign(a,labDefault(),{csv:text,name,source:name,sourceId,title:name,y:Math.min(1,d.headers.length-1)});
-  delete a.pending;labEntry.set(a,'work');render();
+  delete a.pending;labDirty(a);labEntry.set(a,'work');render();
 }
 function labRestore(obj){
   if(obj?.format!=='ResearchFlow analysis v2'||typeof obj.settings?.csv!=='string')throw Error('Unrecognised analysis snapshot.');
@@ -2374,7 +2403,7 @@ async function labOpen(file,id=0){
   if(/\.xlsx$/i.test(file.name)){const w=await labReadExcel(file);if(analysisDraft()!==a)return;
     labEntry.set(a,'work');labWorkbook={...w,owner:a,index:0,header:1,name:file.name,id};goto('analysis');toast('Choose the worksheet and header row, then use the sheet.');return;}
   const text=await file.text();if(analysisDraft()!==a)return;
-  if(/\.analysis\.txt$/i.test(file.name)){labRestore(JSON.parse(text));labEntry.set(a,'work');labWorkbook=null;goto('analysis');}
+  if(/\.analysis\.txt$/i.test(file.name)){labRestore(JSON.parse(text));labPersist(a,'Version saved to workspace');labEntry.set(a,'work');labWorkbook=null;goto('analysis');}
   else{labWorkbook=null;goto('analysis');labLoadData(text,file.name,id);}
 }
 async function labOpenId(id){
@@ -2387,9 +2416,10 @@ async function labUpload(blob,name){
   const form=new FormData();form.append('file',new File([blob],name,{type:blob.type}));const r=await api('/files',{method:'POST',body:form,form:true});return r.id;
 }
 async function labSave(a){
+  if(a.pending!==undefined&&a.pending!==a.csv)throw Error('Apply your edited data before saving a version.');
   const settings={...a};delete settings.pending;
   const stamp=new Date().toISOString().replace(/[:.]/g,'-');
-  return labUpload(new Blob([JSON.stringify({format:'ResearchFlow analysis v2',savedAt:stamp,settings})],{type:'text/plain'}),labStem(a.name)+' '+stamp+'.analysis.txt');
+  return labUpload(new Blob([JSON.stringify({format:'ResearchFlow analysis v2',savedAt:stamp,settings})],{type:'text/plain'}),labStem(a.name)+' '+stamp+(a.versionNote?' -- '+labStem(a.versionNote).slice(0,45):'')+'.analysis.txt');
 }
 function labDownload(blob,name){
   const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=name;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
@@ -2468,8 +2498,8 @@ document.addEventListener('click',async e=>{
     if(act==='sheet'){const w=labWorkbook,index=+$('lab-sheet').value,header=+$('lab-header').value;
       const text=await w.read(index,header);if(analysisDraft()!==a)return;w.index=index;w.header=header;labLoadData(text,w.name+' · '+w.sheets[index].name+' · row '+header,w.id);return;}
     if(act==='human'){labLoadData('Text,Theme,Words\nText A,Education,2000\nText A,Education,2000\nText A,Labour,2000\nText B,Education,4000\nText B,Labour,4000\nText B,Labour,4000','Example · coded passages');Object.assign(a,{mode:labModes[5],category:1,group:0,word:2,title:'Themes across two texts'});render();return;}
-    if(act==='duplicate'){a.name+=' (copy)';render();toast('Copy ready. Save version to keep it.');return;}
-    if(act==='save'){await labSave(a);await reload();toast('Analysis version saved in the workspace.');return;}
+    if(act==='duplicate'){a.name+=' (copy)';labDirty(a);render();toast('Copy ready. Save version to keep it.');return;}
+    if(act==='save'){const key=labLocalKey(),before=JSON.stringify(a);await labSave(a);if(before===JSON.stringify(a))labPersist(a,'Version saved to workspace',key);await reload();toast('Analysis version saved in the workspace.');return;}
     const model=labCompute(a,analysisRows(a.csv));
     if(act==='results'||act==='issues'){labDownload(new Blob([labCsv(act==='results'?[['Series','Measure','Result'],...model.results]:[['Row','Reason'],...model.issues])],{type:'text/csv'}),stem+'-'+act+'.csv');return;}
     if(act==='svg'){labDownload(labSvgBlob(),stem+'.svg');return;}
@@ -2513,4 +2543,8 @@ analysisStyle.textContent+=`
 .lab-data{grid-area:data}.lab-quality{grid-area:quality}.lab-question{grid-area:question}.lab-chart{grid-area:chart}.lab-settings{grid-area:settings}.lab-output{grid-area:output}.lab-notebook{grid-area:note}.lab-tabs{display:none}
 #lab-plot [data-axis-edit],#lab-plot [data-legend-edit]{cursor:text}#lab-plot text:focus{outline:2px solid #167478}
 @media(max-width:850px){#analysis-lab.lab-editor{display:flex;flex-direction:column;align-items:stretch}.lab-editor .lab-tabs{display:flex;gap:6px;position:sticky;top:0;background:white;padding:8px;z-index:2}.lab-tabs [aria-pressed=true]{background:#244d47;color:white}.lab-editor[data-pane]>.card{display:none}.lab-editor[data-pane=Data]>.lab-data,.lab-editor[data-pane=Data]>.lab-quality,.lab-editor[data-pane=Figure]>.lab-question,.lab-editor[data-pane=Figure]>.lab-chart,.lab-editor[data-pane=Figure]>.lab-settings,.lab-editor[data-pane=Results]>.lab-output,.lab-editor[data-pane=Results]>.lab-notebook{display:block}}`;
+for(const kind of ['input','change'])document.addEventListener(kind,e=>{
+  if(e.target.matches('#lab-csv,[data-lab],[data-style],[data-lab-more],[data-lab-unit],[data-lab-type]'))labDirty(analysisDraft());
+});
+window.addEventListener('pagehide',()=>{if(!state.user)return;const a=analysisDraft();if(labStatus.get(a)==='Unsaved changes')labPersist(a);});
 boot();
