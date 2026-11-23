@@ -714,7 +714,7 @@ function recordLink(kind, id) {
 }
 
 function relatedNotes(key, id) {
-  const rows = state.data.notes.filter(n => n[key] === id);
+  const rows = state.data.notes.filter(n => n[key] === id || n[key==='source_id'?'source_ids':'task_ids']?.includes(id));
   return rows.length ? `<p><strong>Notebook</strong> ${rows.map(n => recordLink('note',n.id)).join(' ')}</p>` : '';
 }
 
@@ -727,11 +727,140 @@ function recordOptions(rows, field) {
   return '<option value="">None</option>' + rows.map(r => `<option value="${r.id}">${esc(r[field])}</option>`).join('');
 }
 
-function notesPage() {
-  const notes = state.data.notes;
-  return `${pageHeading('RESEARCH JOURNAL', 'Research notebook', 'Document decisions, meetings, methods, breakthroughs, and next steps.')}
- <div class="two-col"><section><div class="card panel"><div class="panel-heading">Add a research note</div><form id="note-form"><div class="form-grid"><label>Related task<select class="field" name="taskId">${recordOptions(state.data.tasks,'title')}</select></label><label>Library source<select class="field" name="sourceId">${recordOptions(state.data.files,'original_name')}</select></label></div><textarea name="body" class="field" rows="5" maxlength="10000" required placeholder="Record a passage, observation or decision. Include a page or archive reference."></textarea><div style="display:flex;justify-content:flex-end;margin-top:11px"><button type="submit" class="button solid">＋ Save to notebook</button></div></form></div><div class="note-list section-spacer">${notes.length ? notes.map(n => `<div class="card note-card" id="note-${n.id}" tabindex="-1"><div class="note-meta"><span><strong>${esc(n.author_name || 'Researcher')}</strong> · ${timeDate(n.created_at)}</span><button class="text-link" data-delete-note="${n.id}">Delete</button></div><p>${esc(n.body)}</p>${recordLink('task',n.task_id)} ${recordLink('file',n.source_id)}${recordHistory('note',n.id)}</div>`).join('') : empty('≡', 'Notebook is empty', 'Create the first research note.')}</div></section><section class="card panel" style="align-self:start"><div class="panel-heading">Suggested note format</div><div class="mini-tip"><strong>Research activity</strong><br/>Which sources, methods or questions did you work on?</div><div class="mini-tip"><strong>Observations</strong><br/>What results, errors or limitations emerged?</div><div class="mini-tip"><strong>Decisions</strong><br/>Which interpretations or assumptions did you agree on?</div><div class="mini-tip"><strong>Next steps</strong><br/>What should each collaborator do next?</div></section></div>`;
+let draftPage=null, notebookWorkspace=null, citationStyle='APA', rendererPromise;
+function newDraft(){return {id:0,revision:0,taskId:'',sourceId:'',blocks:[{type:'Text',value:''}]};}
+function parseBlocks(body){
+  if(!body)return [{type:'Text',value:''}];
+  return body.split(/(\x60{3}[^\n]*\n[\s\S]*?\n\x60{3}|\$\$[\s\S]*?\$\$)/g).filter(Boolean).flatMap(part=>{
+    if(part.startsWith('\x60\x60\x60'))return [{type:'Code',value:part.slice(part.indexOf('\n')+1,-4)}];
+    if(part.startsWith('$$'))return [{type:'Equation',value:part.slice(2,-2).trim()}];
+    return part.split(/\n\s*\n/).map(x=>x.trim()).filter(Boolean).map(x=>({type:x.split('\n').every(l=>l.startsWith('|'))?'Table':'Text',value:x}));
+  });
 }
+function serializeBlocks(blocks){
+  return blocks.map(({type,value})=>type==='Equation'?'$$\n'+value+'\n$$':type==='Code'?'\x60\x60\x60\n'+value+'\n\x60\x60\x60':value).join('\n\n').trim();
+}
+function ensureRenderers(){
+  if(rendererPromise)return rendererPromise;
+  const style=url=>{const el=document.createElement('link');el.rel='stylesheet';el.href=url;document.head.append(el);};
+  const script=url=>new Promise((resolve,reject)=>{const el=document.createElement('script');el.src=url;el.onload=resolve;el.onerror=reject;document.head.append(el);});
+  style('/vendor/katex/katex.min.css');style('/vendor/highlight.css');
+  rendererPromise=Promise.all([script('/vendor/katex/katex.min.js'),script('/vendor/highlight.min.js')]).catch(()=>{});
+  return rendererPromise;
+}
+function decorateNotes(){
+  ensureRenderers().then(()=>{
+    document.querySelectorAll('[data-equation]').forEach(el=>{
+      if(window.katex)window.katex.render(el.dataset.equation,el,{displayMode:true,throwOnError:false,trust:false});
+    });
+    if(window.hljs)document.querySelectorAll('.rf-note-code:not([data-highlighted])').forEach(el=>window.hljs.highlightElement(el));
+  });
+}
+function inlineWidgets(value){
+  return String(value).split(/(\[\[(?:cite|file|task|user):\d+\]\])/g).map(part=>{
+    const m=part.match(/^\[\[(cite|file|task|user):(\d+)\]\]$/);if(!m)return esc(part);
+    const id=Number(m[2]);
+    if(m[1]==='task'){const t=taskById(id);return t?recordLink('task',id)+' '+statusPill(t.status):'Archived task';}
+    if(m[1]==='user')return '<strong>@'+esc(state.data.members.find(u=>u.id===id)?.name||'Former teammate')+'</strong>';
+    const f=state.data.files.find(f=>f.id===id);
+    return !f?'Unavailable source':m[1]==='file'?'<button class="tiny-btn" data-preview="'+id+'">'+esc(f.original_name)+'</button>':recordLink('file',id);
+  }).join('');
+}
+function tableRows(text){return text.split('\n').filter(Boolean).map(l=>l.replace(/^\||\|$/g,'').split('|').map(c=>c.trim()));}
+function citationEntry(file){
+  if(citationStyle==='BibTeX')return '<pre>'+esc(buildBibtexFallback(file))+'</pre>';
+  const c=file.citation_meta||{},title=c.title||file.original_name,authors=c.authors||'',year=c.year||'n.d.',journal=c.journal||'',doi=c.doi?' https://doi.org/'+c.doi:'';
+  if(citationStyle==='MLA')return esc([authors, '“'+title+'.”',journal, c.year].filter(Boolean).join(' ')+doi);
+  return esc([authors, '('+year+').',title+'.',journal].filter(Boolean).join(' ')+doi);
+}
+function displayNote(n){
+  const blocks=parseBlocks(n.body);
+  const content=blocks.map(b=>{
+    if(b.type==='Code')return '<pre><code class="rf-note-code">'+esc(b.value)+'</code></pre>';
+    if(b.type==='Equation')return '<div data-equation="'+esc(b.value)+'">'+esc(b.value)+'</div>';
+    if(b.type==='Table')return '<div class="task-table-wrap"><table class="task-table">'+tableRows(b.value).map((row,i)=>'<tr>'+row.map(c=>i?'<td>'+inlineWidgets(c)+'</td>':'<th>'+inlineWidgets(c)+'</th>').join('')+'</tr>').join('')+'</table></div>';
+    return '<p style="white-space:pre-wrap">'+inlineWidgets(b.value)+'</p>';
+  }).join('');
+  const ids=new Set([...(n.source_ids||[]),n.source_id].filter(Boolean)),sources=state.data.files.filter(f=>ids.has(f.id));
+  return content+(sources.length?'<h4>References · '+citationStyle+'</h4>'+sources.map(f=>'<div>'+citationEntry(f)+'</div>').join(''):'');
+}
+function blockEditor(b,i){
+  let input='<textarea class="field" rows="'+(b.type==='Text'?3:4)+'" data-block="'+i+'" aria-label="'+b.type+' block">'+esc(b.value)+'</textarea>';
+  if(b.type==='Table'){
+    const rows=tableRows(b.value);
+    input='<div class="task-table-wrap"><table>'+rows.map((r,ri)=>'<tr>'+r.map((c,ci)=>'<td><input class="field" aria-label="Row '+(ri+1)+' column '+(ci+1)+'" data-grid="'+[i,ri,ci].join(',')+'" value="'+esc(c)+'"></td>').join('')+'</tr>').join('')+'</table></div><button type="button" data-grid-row="'+i+'">Add row</button> <button type="button" data-grid-col="'+i+'">Add column</button>';
+  }
+  return '<section class="mini-tip" data-block-wrap="'+i+'"><div class="panel-heading">'+b.type+'<button type="button" class="text-link" data-remove-block="'+i+'">Remove</button></div>'+input+'</section>';
+}
+function notesPage(){
+  if(notebookWorkspace!==state.workspace.id){draftPage=newDraft();notebookWorkspace=state.workspace.id;}
+  const d=draftPage;
+  queueMicrotask(decorateNotes);
+  return pageHeading('RESEARCH JOURNAL','Research notebook','Link evidence, equations, observations and decisions in shared pages.')+
+    '<section class="card panel"><div class="panel-heading">'+(d.id?'Edit notebook page':'New notebook page')+'</div><form id="note-form"><div class="form-grid"><label>Related task<select class="field" name="taskId">'+recordOptions(state.data.tasks,'title').replace('value="'+d.taskId+'"','selected value="'+d.taskId+'"')+'</select></label><label>Primary source<select class="field" name="sourceId">'+recordOptions(state.data.files,'original_name').replace('value="'+d.sourceId+'"','selected value="'+d.sourceId+'"')+'</select></label></div>'+
+    d.blocks.map(blockEditor).join('')+'<div class="rf-tools">'+['Text','Equation','Code','Table'].map(k=>'<button type="button" class="tiny-btn" data-add-block="'+k+'">＋ '+k+'</button>').join('')+
+    '<label>Insert <select id="inline-record" class="field"><option value="">Mention, task or citation…</option>'+[['user',state.data.members,'name'],['task',state.data.tasks,'title'],['cite',state.data.files,'original_name']].map(([k,rows,field])=>'<optgroup label="'+k+'">'+rows.map(r=>'<option value="'+k+':'+r.id+'">'+esc(r[field])+'</option>').join('')+'</optgroup>').join('')+'</select></label></div>'+
+    '<p class="small-text muted">Type /code, /math or /table at the start of a text block. Use @, #link or [[cite]] to choose a workspace record.</p><div class="file-drop" id="note-drop"><label>Attach a plot or dataset <input type="file" multiple id="note-attachment"></label></div><div aria-live="polite" id="note-upload-status"></div><button type="submit" class="button solid">Save notebook page</button> <button type="button" class="tiny-btn" id="reset-draft">New draft</button></form></section>'+
+    '<div class="panel-heading section-spacer">Notebook pages <label>References <select id="citation-style">'+['APA','MLA','BibTeX'].map(k=>'<option '+(k===citationStyle?'selected':'')+'>'+k+'</option>').join('')+'</select></label></div>'+
+    state.data.notes.map(n=>'<article tabindex="-1" id="note-'+n.id+'" class="card panel section-spacer"><div class="panel-heading">'+esc(n.author_name)+' · '+timeDate(n.created_at)+'<span><button class="tiny-btn" data-edit-note="'+n.id+'">Edit</button> <button class="tiny-btn" data-note-ai="'+n.id+'">Ask agent</button> <button class="text-link" data-delete-note="'+n.id+'">Delete</button></span></div>'+displayNote(n)+recordLink('task',n.task_id)+recordHistory('note',n.id)+'</article>').join('');
+}
+let focusedBlock=0;
+document.addEventListener('focusin',e=>{if(e.target.dataset.block!==undefined)focusedBlock=Number(e.target.dataset.block);});
+function addBlock(type){
+  const block={type,value:type==='Table'?'| Dimension | Observation |\n|  |  |':''};
+  draftPage.blocks.push(block);focusedBlock=draftPage.blocks.length-1;render();document.querySelector('[data-block="'+focusedBlock+'"]')?.focus();
+}
+function insertWidget(token){
+  let b=draftPage.blocks[focusedBlock];if(!b||b.type!=='Text'){draftPage.blocks.push({type:'Text',value:''});focusedBlock=draftPage.blocks.length-1;b=draftPage.blocks[focusedBlock];}
+  b.value=b.value.replace(/(?:@|#link|\[\[cite\]\])$/,'')+' [['+token+']] ';render();document.querySelector('[data-block="'+focusedBlock+'"]')?.focus();
+}
+document.addEventListener('input',e=>{
+  const el=e.target;if(!el.closest('#note-form'))return;
+  if(el.name==='taskId'||el.name==='sourceId'){draftPage[el.name]=el.value;return;}
+  if(el.dataset.grid){
+    const [i,r,c]=el.dataset.grid.split(',').map(Number),rows=tableRows(draftPage.blocks[i].value);
+    rows[r][c]=el.value.replaceAll('|','¦');draftPage.blocks[i].value=rows.map(row=>'|'+row.join('|')+'|').join('\n');
+  }
+  if(el.dataset.block===undefined)return;
+  const b=draftPage.blocks[Number(el.dataset.block)];b.value=el.value;
+  if(b.type!=='Text')return;
+  const type={'/math':'Equation','/code':'Code','/table':'Table'}[el.value.trim()];
+  if(type){b.type=type;b.value=type==='Table'?'| Field | Value |\n|  |  |':'';render();document.querySelector('[data-block="'+focusedBlock+'"]')?.focus();}
+  else if(/(?:@|#link|\[\[cite\]\])$/.test(b.value))$('inline-record').focus();
+});
+document.addEventListener('click',e=>{
+  const el=e.target.closest('button');if(!el)return;
+  if(el.dataset.addBlock)addBlock(el.dataset.addBlock);
+  if(el.dataset.removeBlock!==undefined){draftPage.blocks.splice(Number(el.dataset.removeBlock),1);if(!draftPage.blocks.length)draftPage.blocks=newDraft().blocks;render();}
+  if(el.dataset.gridRow!==undefined||el.dataset.gridCol!==undefined){
+    const isRow=el.dataset.gridRow!==undefined,b=draftPage.blocks[Number(isRow?el.dataset.gridRow:el.dataset.gridCol)],rows=tableRows(b.value);
+    if(isRow)rows.push(Array(rows[0].length).fill(''));else rows.forEach(row=>row.push(''));
+    b.value=rows.map(row=>'|'+row.join('|')+'|').join('\n');render();
+  }
+  if(el.id==='reset-draft'){draftPage=newDraft();render();connectLive();}
+  if(el.dataset.editNote){const n=state.data.notes.find(n=>n.id===Number(el.dataset.editNote));draftPage={id:n.id,revision:n.revision,sourceId:n.source_id||'',taskId:n.task_id||'',blocks:parseBlocks(n.body)};render();$('note-form').scrollIntoView();connectLive();}
+  if(el.dataset.noteAi){const n=state.data.notes.find(n=>n.id===Number(el.dataset.noteAi));handleAgent('Propose validation or follow-up tasks from notebook page '+n.id+': '+n.body.slice(0,2200));}
+});
+async function attachToNote(files){
+  const draft=draftPage,workspace=state.workspace.id,failures=[];
+  for(const f of Array.from(files)){
+    if(draft!==draftPage||workspace!==state.workspace.id)break;
+    try{
+      if(f.size>15*1024*1024)throw Error('exceeds 15 MiB');
+      const form=new FormData();form.append('file',f);
+      const r=await api('/files',{method:'POST',body:form,form:true});
+      draft.blocks.push({type:'Text',value:'[[file:'+r.id+']]'});
+    }catch(e){failures.push(f.name+' — '+e.message);}
+  }
+  await reload();if($('note-upload-status'))$('note-upload-status').textContent=failures.join(' · ')||'Attachments added to this draft.';
+}
+document.addEventListener('change',e=>{
+  if(e.target.id==='citation-style'){citationStyle=e.target.value;render();}
+  if(e.target.id==='inline-record'&&e.target.value)insertWidget(e.target.value);
+  if(e.target.id==='note-attachment')attachToNote(e.target.files);
+});
+document.addEventListener('dragover',e=>{if(e.target.closest('#note-drop'))e.preventDefault();});
+document.addEventListener('drop',e=>{if(e.target.closest('#note-drop')){e.preventDefault();attachToNote(e.dataTransfer.files);}});
 
 function activityRows(rows) {
   if (!rows.length) return empty('◷', 'No activity yet', 'Task and file changes will appear here.');
@@ -1023,8 +1152,10 @@ document.addEventListener('submit', async e => {
     }
     if (form.id === 'task-form') await createTask(form);
     if (form.id === 'note-form') {
-      const body = form.elements.body.value;
-      await api('/notes', { method: 'POST', body: { body, sourceId: Number(form.elements.sourceId.value) || null, taskId: Number(form.elements.taskId.value) || null } });
+      const body=serializeBlocks(draftPage.blocks);
+      const id=draftPage.id;
+      await api(id?'/notes/'+id:'/notes',{method:id?'PATCH':'POST',body:{body,revision:draftPage.revision,sourceId:Number(form.elements.sourceId.value)||null,taskId:Number(form.elements.taskId.value)||null}});
+      draftPage=newDraft();
       toast('Research note saved');
       await reload();
     }
@@ -1451,7 +1582,7 @@ function connectLive(){
     activeWorkspace=w; selectedTasks.clear(); undoStack=[];redoStack=[];state.messages=[];state.pendingActions=[];
   }
   const task=$('task-dialog').open && taskById($('task-form').elements.id.value);
-  const view=task?'Editing '+task.title:({tasks:'Task board',notes:'Research notebook',files:'Research library',activity:'Activity timeline',agent:'AI agent',overview:'Overview',team:'Team'}[state.page]);
+  const view=task?'Editing '+task.title:state.page==='notes'&&draftPage?.id?'Editing notebook page '+draftPage.id:({tasks:'Task board',notes:'Research notebook',files:'Research library',activity:'Activity timeline',agent:'AI agent',overview:'Overview',team:'Team'}[state.page]);
   const key=w+'|'+view;
   if(key===liveKey)return;
   closeLive();liveKey=key;
@@ -1588,7 +1719,7 @@ function graphView(){
   groups.forEach((nodes,i)=>nodes.forEach(([kind,id],j)=>points.set(kind+id,[95+i*190,30+j*56])));
   function edge(a,b){const from=points.get(a),to=points.get(b);if(from&&to)edges.push('<path d="M'+from.join(' ')+' Q'+(from[0]+50)+' '+((from[1]+to[1])/2)+' '+to.join(' ')+'"/>');}
   tasks.forEach(t=>t.source_ids?.forEach(id=>edge('task'+t.id,'file'+id)));
-  notes.forEach(n=>{edge('note'+n.id,'task'+n.task_id);edge('note'+n.id,'file'+n.source_id);});
+  notes.forEach(n=>{for(const id of n.task_ids||[n.task_id])edge('note'+n.id,'task'+id);for(const id of n.source_ids||[n.source_id])edge('note'+n.id,'file'+id);});
   runs.forEach(r=>{edge('run'+r.id,'task'+r.task_id);edge('run'+r.id,'file'+r.output_id);});
   dependencies.forEach(d=>edge('task'+d.predecessor,'task'+d.successor));
   const h=Math.max(1,...groups.map(g=>g.length))*56+12;
