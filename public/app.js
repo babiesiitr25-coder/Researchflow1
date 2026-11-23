@@ -2244,7 +2244,25 @@ const labSaved=f=>/\.analysis\.txt$/i.test(f.original_name);
 const labSource=f=>/\.(csv|tsv|xlsx)$/i.test(f.original_name);
 function labFileButton(f){return labSource(f)||labSaved(f)?'<button class="tiny-btn" data-lab-file="'+Number(f.id)+'">Open in Data analysis</button>':'';}
 let labWorkbook=null;
+const labEntry = new WeakMap();
+function labStart(a){
+  const path=labEntry.get(a)||'home';
+  const btn=(key,label)=>'<button class="button secondary" data-start="'+key+'">'+label+'</button>';
+  const opts=(list,first)=>labOptions([['',first],...list.map(f=>[f.id,f.original_name])],'');
+  let panel=labEntry.has(a)?btn('work','Return to current analysis'):'';
+  if(path==='open')panel+='<section class="card panel"><h2>Open dataset</h2><div class="lab-fields"><label>From the research library<select class="field" id="lab-source">'+opts(state.data.files.filter(labSource),'Choose a dataset…')+'</select></label><label>Upload CSV, TSV or Excel<input type="file" id="lab-upload" accept=".csv,.tsv,.xlsx,.txt"></label></div><details><summary>Paste data</summary><textarea class="field" id="lab-csv" rows="6" aria-label="Delimited dataset">'+esc(a.pending||'')+'</textarea><button class="button solid" data-lab-action="apply">Use pasted data</button></details></section>';
+  if(path==='resume')panel+='<section class="card panel"><h2>Resume analysis</h2><label>Saved analyses<select class="field" id="lab-saved">'+opts(state.data.files.filter(labSaved),'Choose a saved version…')+'</select></label></section>';
+  if(path==='examples')panel+='<section class="card panel"><h2>Choose an example</h2><div class="rf-tools">'+btn('numeric','Numerical research')+'<button class="button secondary" data-lab-action="human">Humanities research</button></div></section>';
+  return pageHeading('RESEARCH METHODS','Data analysis','Choose a dataset or continue an existing analysis.')+'<div id="analysis-lab"><section class="card panel"><div class="rf-tools">'+btn('open','Open dataset')+btn('resume','Resume analysis')+btn('examples','Try an example')+'</div></section>'+panel+'</div>';
+}
+document.addEventListener('click',e=>{
+  const b=e.target.closest('[data-start]');if(!b)return;
+  const a=analysisDraft(),choice=b.dataset.start;
+  if(choice==='numeric'){Object.assign(a,labDefault());delete a.pending;labWorkbook=null;}
+  labEntry.set(a,choice==='numeric'?'work':choice);render();
+});
 function analysisPage(){
+  if(labEntry.get(analysisDraft())!=='work')return labStart(analysisDraft());
   const a=analysisDraft(),d=analysisRows(a.csv),cols=d.headers.map((h,i)=>[i,h||'Column '+(i+1)]);
   const select=(key,label,items)=>'<label>'+label+'<select class="field" data-lab="'+key+'">'+labOptions(items,a[key])+'</select></label>';
   const input=(key,label,type='text',limits='')=>'<label>'+label+'<input class="field" data-lab="'+key+'" type="'+type+'" '+limits+' value="'+esc(a[key])+'"></label>';
@@ -2254,9 +2272,7 @@ function analysisPage(){
   const uniqueGroups=+a.group>=0?[...new Set(d.rows.map(r=>r[a.group]).filter(Boolean))]:[];
   return pageHeading('RESEARCH METHODS','Data analysis','Prepare a dataset, compare evidence, and save reproducible figures.')+
     '<div id="analysis-lab"><section class="card panel"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+
-    '<label>Saved analyses<select id="lab-saved" class="field">'+labOptions([['','Choose a version…'],...saved.map(f=>[f.id,f.original_name.replace(/\.analysis\.txt$/i,'')])],'')+'</select></label>'+
-    '<label>Research library<select id="lab-source" class="field">'+labOptions([['','Open dataset…'],...source.map(f=>[f.id,f.original_name])],'')+'</select></label>'+
-    '<label>Import CSV, TSV or Excel<input type="file" id="lab-upload" accept=".csv,.tsv,.xlsx,.txt"></label></div><div class="rf-tools">'+(write?button('save','Save version'):'')+button('duplicate','Duplicate analysis')+button('human','Load humanities example')+
+    '</div><div class="rf-tools"><button class="tiny-btn" data-start="open">Change dataset</button><button class="tiny-btn" data-start="resume">Open saved version</button>'+(write?button('save','Save version'):'')+button('duplicate','Duplicate analysis')+
     (a.sourceId?'<button class="tiny-btn" data-preview="'+Number(a.sourceId)+'">View source record</button>':'')+'</div><details><summary>Paste or edit data</summary><textarea id="lab-csv" class="field" rows="6" aria-label="Delimited dataset">'+esc(a.pending??a.csv)+'</textarea>'+button('apply','Apply data')+'</details>'+
     (labWorkbook?.owner===a?'<div class="lab-fields"><label>Excel sheet<select id="lab-sheet" class="field">'+labOptions(labWorkbook.sheets.map((s,i)=>[i,s.name]),labWorkbook.index)+'</select></label><label>Header row<input class="field" id="lab-header" type="number" min="1" value="'+labWorkbook.header+'"></label>'+button('sheet','Use sheet and header')+'</div>':'')+
     '</section><details class="card panel"><summary>Data preview and quality checks</summary><div id="lab-quality"></div></details>'+
@@ -2331,7 +2347,7 @@ async function labReadExcel(file){
 function labLoadData(text,name,sourceId=0){
   if(text.length>8e6)throw Error('Select a dataset under 8 MB.');
   const d=analysisRows(text),a=analysisDraft();Object.assign(a,labDefault(),{csv:text,name,source:name,sourceId,title:name,y:Math.min(1,d.headers.length-1)});
-  delete a.pending;render();
+  delete a.pending;labEntry.set(a,'work');render();
 }
 function labRestore(obj){
   if(obj?.format!=='ResearchFlow analysis v2'||typeof obj.settings?.csv!=='string')throw Error('Unrecognised analysis snapshot.');
@@ -2354,9 +2370,9 @@ function labRestore(obj){
 async function labOpen(file,id=0){
   const a=analysisDraft();if(file.size>12e6)throw Error('Select a file under 12 MB.');
   if(/\.xlsx$/i.test(file.name)){const w=await labReadExcel(file);if(analysisDraft()!==a)return;
-    labWorkbook={...w,owner:a,index:0,header:1,name:file.name,id};goto('analysis');toast('Choose the worksheet and header row, then use the sheet.');return;}
+    labEntry.set(a,'work');labWorkbook={...w,owner:a,index:0,header:1,name:file.name,id};goto('analysis');toast('Choose the worksheet and header row, then use the sheet.');return;}
   const text=await file.text();if(analysisDraft()!==a)return;
-  if(/\.analysis\.txt$/i.test(file.name)){labRestore(JSON.parse(text));labWorkbook=null;goto('analysis');}
+  if(/\.analysis\.txt$/i.test(file.name)){labRestore(JSON.parse(text));labEntry.set(a,'work');labWorkbook=null;goto('analysis');}
   else{labWorkbook=null;goto('analysis');labLoadData(text,file.name,id);}
 }
 async function labOpenId(id){
