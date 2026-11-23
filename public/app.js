@@ -2416,7 +2416,18 @@ function labUpdate(key,value){
   if(['x','y','word','group','category'].includes(key))a[key]=Number(value);
   if(['mode','group','y','frequency','method'].includes(key))render();else drawAnalysis();
 }
-document.addEventListener('input',e=>{if(e.target.id==='lab-csv')analysisDraft().pending=e.target.value;});
+document.addEventListener('input',e=>{
+  const el=e.target;
+  if(!el.closest('#analysis-lab'))return;
+  const a=analysisDraft();
+  if(el.id==='lab-csv')a.pending=el.value;
+  if(el.type==='text'&&el.dataset.lab)a[el.dataset.lab]=el.value;
+  if(el.dataset.labUnit!==undefined)a.units[el.dataset.labUnit]=el.value;
+  if(el.dataset.style==='label'){
+    a.styles=Object.assign(Object.create(null),a.styles);
+    a.styles[el.dataset.series]={...Object.getOwnPropertyDescriptor(a.styles,el.dataset.series)?.value,label:el.value};
+  }
+});
 document.addEventListener('change',async e=>{
   const el=e.target;if(!el.closest('#analysis-lab'))return;
   try{
