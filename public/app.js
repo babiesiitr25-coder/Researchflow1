@@ -286,9 +286,64 @@ function filteredTasks() {
   return arr;
 }
 
+let taskLayout = 'Board';
+const movingCards = new Set();
+
+function taskResults() {
+  const tasks = filteredTasks();
+  if (taskLayout === 'Table') return table(tasks);
+  return '<div style="display:grid;grid-template-columns:repeat(4,minmax(175px,1fr));gap:12px;overflow-x:auto;padding-bottom:8px">' +
+    statuses.map((status,index) => {
+      const rows = tasks.filter(t => t.status === status);
+      const color = ['#8793a5','#bf8641','#b36165','#318874'][index];
+      return `<section aria-label="${status}" data-lane="${status}" style="background:#f6f8f7;border-top:3px solid ${color};border-radius:8px;padding:10px;min-height:160px">
+        <h3 style="font-size:14px;margin:0 0 12px">${status} <small class="muted">${rows.length}</small></h3>
+        ${rows.map(t => `<article draggable="${!movingCards.has(t.id)}" data-card="${t.id}" class="card" style="padding:12px;margin-bottom:8px;display:grid;gap:8px">
+          <small class="muted">${esc(t.phase)}</small><button class="text-link" style="text-align:left" data-edit="${t.id}">${esc(t.title)}</button>
+          <small>${esc(t.assignee_name || 'Unassigned')} · ${esc(t.due_date || 'No due date')}</small>
+          <select class="field" aria-label="Move ${esc(t.title)}" data-move-card="${t.id}" ${movingCards.has(t.id)?'disabled':''}>${statuses.map(s => `<option ${s===status?'selected':''}>${s}</option>`).join('')}</select>
+        </article>`).join('')}
+      </section>`;
+    }).join('') + '</div>';
+}
+async function moveCard(id,status) {
+  const task = state.data.tasks.find(t=>t.id===id);
+  if (!task || task.status===status || movingCards.has(id) || !statuses.includes(status)) return;
+  const previous = task.status;
+  const workspace = state.workspace.id;
+  movingCards.add(id);
+  task.status=status;
+  render();
+  try {
+    await api('/tasks/'+id,{method:'PATCH',body:{status}});
+    toast('Moved to '+status);
+  } catch(error) {
+    task.status=previous;
+    toast(error.message,true);
+  } finally {
+    movingCards.delete(id);
+    if (state.workspace?.id===workspace) {
+      render();
+      await reload({quiet:true});
+    }
+  }
+}
+document.addEventListener('dragstart',e=>{
+  const card=e.target.closest('[data-card]');
+  if(card) e.dataTransfer.setData('application/x-researchflow-task',card.dataset.card);
+});
+document.addEventListener('dragover',e=>{
+  if(e.target.closest('[data-lane]') && e.dataTransfer.types.includes('application/x-researchflow-task')) e.preventDefault();
+});
+document.addEventListener('drop',e=>{
+  const lane=e.target.closest('[data-lane]');
+  if(!lane || !e.dataTransfer.types.includes('application/x-researchflow-task')) return;
+  e.preventDefault();
+  moveCard(Number(e.dataTransfer.getData('application/x-researchflow-task')),lane.dataset.lane);
+});
 function tasksPage() {
   const total = state.data.tasks.length;
-  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Organise reading, fieldwork, analysis and writing. Link each task to its sources.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span></div><div id="task-table-target">${table(filteredTasks())}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
+  return `${pageHeading('WORK MANAGEMENT', 'Task board', 'Organise reading, fieldwork, analysis and writing. Link each task to its sources.', `<button class="button solid" data-new-task>＋ Create task</button>`)}<div class="card panel"><div class="filter-bar"><div class="search-box"><input class="field" id="task-search" placeholder="Search tasks..." value="${esc(state.search)}" /></div><select class="field" id="status-filter"><option>All</option>${statuses.map(s => `<option ${state.filter === s ? 'selected' : ''}>${s}</option>`).join('')}</select><select class="field" id="phase-filter"><option>All</option>${phases.map(p => `<option ${state.phaseFilter === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div><div class="panel-heading"><span>Research tasks <span class="muted small-text" id="task-count">(${filteredTasks().length} of ${total})</span></span><div class="inline-actions">${['Board','Table'].map(v=>'<button class="tiny-btn" aria-pressed="'+(v===taskLayout)+'" data-layout="'+v+'">'+v+'</button>').join('')}</div></div><div id="task-table-target">${taskResults()}</div></div><div class="hint section-spacer">Tip: Open a task to assign it to any teammate, set a due date, or change its status. Changes are saved in the shared workspace database.</div>`;
 }
 
 function agentPage() {
@@ -1054,6 +1109,7 @@ document.addEventListener('submit', async e => {
 document.addEventListener('click', async e => {
   const el = e.target.closest('button');
   if (!el) return;
+  if (el.dataset.layout) { taskLayout=el.dataset.layout; render(); return; }
   if (el.id === 'browse-files') { $('file-input').click(); return; }
   if (el.id === 'open-finder') {
     const finder = $('find-records');
@@ -1283,7 +1339,7 @@ document.addEventListener('click', async e => {
 document.addEventListener('input', e => {
   if (e.target.id === 'task-search') {
     state.search = e.target.value;
-    $('task-table-target').innerHTML = table(filteredTasks());
+    $('task-table-target').innerHTML = taskResults();
     $('task-count').textContent = '(' + filteredTasks().length + ' of ' + state.data.tasks.length + ')';
   }
   if (e.target.id === 'lib-search') {
@@ -1296,6 +1352,7 @@ document.addEventListener('input', e => {
 
 document.addEventListener('change', async e => {
   const t = e.target;
+  if (t.dataset.moveCard) { await moveCard(Number(t.dataset.moveCard),t.value); return; }
   if (t.id === 'workspace-switcher') {
     if (t.value === '__new__') {
       const name = prompt('Enter a name for your new research workspace:');
