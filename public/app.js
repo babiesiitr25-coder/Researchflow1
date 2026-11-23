@@ -447,7 +447,7 @@ function renderFileListOrMatrix(files) {
                   <button class="tiny-btn" data-new-dimension="${f.id}">Add dimension</button>
                   <button class="tiny-btn" data-open-review="${f.id}">${rev ? '✧ Review' : '✧ Analyze'}</button>
                   <button class="tiny-btn" data-copy-bibtex="${f.id}" title="Copy BibTeX">📋 BibTeX</button>
-                  <button class="tiny-btn" data-download="${f.id}" title="Download">↓</button>
+                  ${labFileButton(f)} <button class="tiny-btn" data-download="${f.id}" title="Download">↓</button>
                 </div>
               </td>
             </tr>`;
@@ -500,7 +500,7 @@ function renderFileListOrMatrix(files) {
               : `<button class="button secondary small" data-open-review="${f.id}">📝 Notes</button>`
           }
           <button class="button secondary small" data-copy-bibtex="${f.id}" title="Copy BibTeX citation">📋 BibTeX</button>
-          <button class="button secondary small" data-download="${f.id}">↓ Download</button>
+          ${labFileButton(f)} <button class="button secondary small" data-download="${f.id}">↓ Download</button>
           <button class="button ghost small" data-delete-file="${f.id}">Delete</button>
         </div>
       </div>`;
@@ -774,6 +774,8 @@ function inlineWidgets(value){
     if(m[1]==='task'){const t=taskById(id);return t?recordLink('task',id)+' '+statusPill(t.status):'Archived task';}
     if(m[1]==='user')return '<strong>@'+esc(state.data.members.find(u=>u.id===id)?.name||'Former teammate')+'</strong>';
     const f=state.data.files.find(f=>f.id===id);
+    if(f && m[1]==='file' && labSaved(f))return labFileButton(f);
+    if(f && m[1]==='file' && / figure [0-9]+\.png$/i.test(f.original_name))return '<img loading="lazy" class="lab-note-figure" alt="'+esc(f.original_name)+'" src="/api/files/'+id+'/preview">';
     return !f?'Unavailable source':m[1]==='file'?'<button class="tiny-btn" data-preview="'+id+'">'+esc(f.original_name)+'</button>':recordLink('file',id);
   }).join('');
 }
@@ -1974,18 +1976,6 @@ document.head.append(boardStyles);
 const presenceLabel=document.createElement('span');
 presenceLabel.id='presence';presenceLabel.className='rf-presence';
 $('sync-status').before(presenceLabel);
-// Each workspace keeps a separate browser-session draft.
-const analysisDrafts = new Map();
-function analysisDraft() {
-  const key = JSON.stringify([state.user.id, state.workspace?.id]);
-  if (!analysisDrafts.has(key)) analysisDrafts.set(key, {
-    csv:'Load (kN),Displacement (mm)\n10,0.72\n20,1.46\n30,2.04\n40,2.93\n50,3.35\n60,4.28',
-    name:'Example · load test', x:0, y:1, type:'Scatter', title:'Load–displacement response',
-    xlabel:'', ylabel:'', color:'#176b72', font:'Arial', grid:true, fit:true
-  });
-  return analysisDrafts.get(key);
-}
-
 function analysisRows(text) {
   const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g,'\n');
   const delim = clean.split('\n')[0].includes('\t') ? '\t' : ',';
@@ -2008,126 +1998,451 @@ function analysisRows(text) {
   if(rows.length>25000) throw Error('Use up to 25,000 rows per figure.');
   return {headers,rows};
 }
-
-function analysisModel(data,a) {
-  const numeric=v=>v!=='' && Number.isFinite(Number(v));
-  const ys=data.rows.map(r=>r[a.y]).filter(numeric).map(Number).sort((a,b)=>a-b);
-  const pairs=data.rows.filter(r=>numeric(r[a.x]) && numeric(r[a.y])).map(r=>[+r[a.x],+r[a.y]]);
-  const mean=arr=>arr.reduce((s,v)=>s+v,0)/arr.length;
-  const avg=mean(ys), quantile=p=>{
-    const pos=(ys.length-1)*p, i=Math.floor(pos);
-    return ys[i]+(pos-i)*((ys[i+1]??ys[i])-ys[i]);
+const labDrafts = new Map();
+const labPalette = ['#167478','#bb5934','#4f64a1','#8a577e','#688040','#93692d'];
+const labModes = ['Fit a trend','Compare measured and predicted','Compare groups','Test an association','Describe a distribution','Explore coded texts'];
+const labMethods = ['Linear','Quadratic','Cubic','Logarithmic','Exponential','Power'];
+const labNum = s => String(s??'').trim()!=='' && Number.isFinite(Number(s)) ? Number(s) : NaN;
+const labFmt = n => Number.isFinite(n)?String(+n.toPrecision(5)):'—';
+const labMean = a => a.reduce((s,x)=>s+x,0)/a.length;
+const labSum = a => a.reduce((s,x)=>s+x,0);
+const labCsv = rows => rows.map(row=>row.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(',')).join('\n');
+function labDefault(){
+  return {csv:'Load (kN),Measured (mm),Predicted (mm)\n10,0.72,0.68\n20,1.46,1.38\n30,2.04,2.12\n40,2.93,2.81\n50,3.35,3.51\n60,4.28,4.21',name:'Load–displacement study',source:'Example dataset',sourceId:0,
+    mode:labModes[0],method:'Linear',type:'Scatter',x:0,y:1,more:[],group:-1,word:-1,category:0,frequency:'Counts',title:'Load–displacement response',xlabel:'',ylabel:'',font:'Arial',size:11,width:170,height:105,xmin:'',xmax:'',ymin:'',ymax:'',xtick:'',ytick:'',logx:false,logy:false,grid:true,gray:false,fit:true,error:'95% CI',styles:{},types:{},units:{},caption:'',groupA:'',groupB:''};
+}
+function analysisDraft(){
+  const key=JSON.stringify([state.user.id,state.workspace?.id]);
+  if(!labDrafts.has(key))labDrafts.set(key,labDefault());
+  return labDrafts.get(key);
+}
+function labSummary(values){
+  const a=values.slice().sort((x,y)=>x-y),mean=labMean(a);
+  const q=p=>{const t=(a.length-1)*p,i=Math.floor(t);return a[i]+(t-i)*((a[i+1]??a[i])-a[i]);};
+  const variance=a.length>1?labSum(a.map(v=>(v-mean)**2))/(a.length-1):NaN;
+  return {n:a.length,mean,sd:Math.sqrt(variance),se:Math.sqrt(variance/a.length),median:q(.5),q1:q(.25),q3:q(.75),min:a[0],max:a.at(-1)};
+}
+// Student t probabilities via the regularized incomplete beta continued fraction.
+function labLogGamma(z){
+  const p=[676.5203681218851,-1259.1392167224028,771.3234287776531,-176.61502916214059,12.507343278686905,-.13857109526572012,9.984369578019572e-6,1.5056327351493116e-7];
+  if(z<.5)return Math.log(Math.PI)-Math.log(Math.sin(Math.PI*z))-labLogGamma(1-z);
+  z--;let x=.9999999999998099;p.forEach((v,i)=>x+=v/(z+i+1));const t=z+7.5;return .5*Math.log(2*Math.PI)+(z+.5)*Math.log(t)-t+Math.log(x);
+}
+function labBeta(a,b,x){
+  if(x<=0)return 0;if(x>=1)return 1;
+  if(x>(a+1)/(a+b+2))return 1-labBeta(b,a,1-x);
+  const safe=x=>Math.abs(x)<1e-30?1e-30:x;
+  let c=1,d=1/safe(1-(a+b)*x/(a+1)),h=d;
+  for(let m=1;m<=150;m++){
+    let k=m*(b-m)*x/((a+2*m-1)*(a+2*m));d=1/safe(1+k*d);c=safe(1+k/c);h*=c*d;
+    k=-(a+m)*(a+b+m)*x/((a+2*m)*(a+2*m+1));d=1/safe(1+k*d);c=safe(1+k/c);const delta=c*d;h*=delta;if(Math.abs(delta-1)<1e-13)break;
+  }
+  return Math.exp(labLogGamma(a+b)-labLogGamma(a)-labLogGamma(b)+a*Math.log(x)+b*Math.log1p(-x))*h/a;
+}
+function labTCrit(df){
+  if(!(df>0))return NaN;
+  let lo=0,hi=16;for(let i=0;i<40;i++){const t=(lo+hi)/2;if(labBeta(df/2,.5,df/(df+t*t))>.05)lo=t;else hi=t;}return (lo+hi)/2;
+}
+function labRank(a){
+  const s=a.map((v,i)=>({v,i})).sort((a,b)=>a.v-b.v),out=[];
+  for(let i=0;i<s.length;){let j=i+1;while(j<s.length&&s[j].v===s[i].v)j++;for(let k=i;k<j;k++)out[s[k].i]=(i+j+1)/2;i=j;}return out;
+}
+function labCorrelation(x,y){
+  const mx=labMean(x),my=labMean(y),dx=x.map(v=>v-mx),dy=y.map(v=>v-my);
+  const r=labSum(dx.map((v,i)=>v*dy[i]))/Math.sqrt(labSum(dx.map(v=>v*v))*labSum(dy.map(v=>v*v)));
+  return Math.max(-1,Math.min(1,r));
+}
+function labRegression(points,method){
+  const logX=['Logarithmic','Power'].includes(method), logY=['Exponential','Power'].includes(method);
+  const p=points.filter(([x,y])=>(!logX||x>0)&&(!logY||y>0));
+  const degree=method==='Cubic'?3:method==='Quadratic'?2:1, k=degree+1;
+  if(p.length<k)throw Error(method+' requires at least '+k+' eligible pairs.');
+  const x=p.map(v=>logX?Math.log(v[0]):v[0]),y=p.map(v=>logY?Math.log(v[1]):v[1]);
+  const center=labMean(x),scale=Math.max(...x.map(v=>Math.abs(v-center)));
+  if(!scale)throw Error('X must vary to estimate a trend.');
+  const u=x.map(v=>(v-center)/scale), q=[],r=Array.from({length:k},()=>Array(k).fill(0));
+  for(let j=0;j<k;j++){
+    let col=u.map(v=>v**j);
+    for(let i=0;i<j;i++){r[i][j]=labSum(col.map((v,n)=>v*q[i][n]));col=col.map((v,n)=>v-r[i][j]*q[i][n]);}
+    r[j][j]=Math.sqrt(labSum(col.map(v=>v*v)));
+    if(r[j][j]<1e-10*Math.sqrt(p.length))throw Error('Too few distinct X values for this model.');
+    q[j]=col.map(v=>v/r[j][j]);
+  }
+  const back=b=>{const v=b.slice();for(let i=k-1;i>=0;i--){for(let j=i+1;j<k;j++)v[i]-=r[i][j]*v[j];v[i]/=r[i][i];}return v;};
+  const c=back(q.map(col=>labSum(col.map((v,i)=>v*y[i]))));
+  const linear=u=>c.reduceRight((s,v)=>s*u+v,0);
+  const predict=x=>{const z=linear(((logX?Math.log(x):x)-center)/scale);return logY?Math.exp(z):z;};
+  const residual=p.map(([x,y])=>[x,y-predict(x)]),sse=labSum(residual.map(t=>t[1]**2)),avg=labMean(p.map(v=>v[1])),sst=labSum(p.map(v=>(v[1]-avg)**2));
+  const df=p.length-k,noise=labSum(y.map((v,i)=>(v-linear(u[i]))**2))/df,t=labTCrit(df);
+  const inv=Array.from({length:k},(_,j)=>back(Array.from({length:k},(_,i)=>+(i===j))));
+  const stats=[['Model',method],['Eligible pairs',p.length],['Domain exclusions',points.length-p.length],['R² (original Y)',labFmt(sst?1-sse/sst:NaN)],['RMSE',labFmt(Math.sqrt(sse/p.length))],['MAE',labFmt(labMean(residual.map(t=>Math.abs(t[1]))))]];
+  // Convert coefficients and covariance from the centred basis to powers of x or ln(x).
+  const choose=[[1],[1,1],[1,2,1],[1,3,3,1]];
+  for(let i=0;i<k;i++){
+    const weights=c.map((_,j)=>j<i?0:choose[j][i]*(-center)**(j-i)/scale**j);
+    const estimate=labSum(c.map((v,j)=>v*weights[j]));
+    const se=Math.sqrt(noise*labSum(inv.map(col=>labSum(col.map((v,j)=>v*weights[j]))**2)));
+    const ci=Number.isFinite(t*se)?' ['+labFmt(estimate-t*se)+', '+labFmt(estimate+t*se)+']':'';
+    stats.push([['Intercept','Slope','Quadratic coefficient','Cubic coefficient'][i],labFmt(estimate)+ci]);
+  }
+  return {p,predict,residual,stats};
+}
+function labCompute(a,d){
+  const info={series:[],results:[],issues:[],message:'',categorical:false,labels:[],xname:d.headers[a.x],yname:d.headers[a.y]};
+  const numeric=(row,c)=>{if(a.types[c]==='Text')return NaN;const s=String(row[c]??'').trim();return labNum(a.types[c]==='Number (grouped)'&&/^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)?s.replaceAll(',',''):s);};
+  const add=(key,rows)=>info.results.push(...rows.map(([metric,value])=>[key,metric,value]));
+  const issue=(i,s)=>info.issues.push([i+2,s]);
+  if(a.mode===labModes[5]){
+    info.categorical=true;info.xname=d.headers[a.category];info.yname=a.frequency;
+    const counts=new Map(),totals=new Map(),denoms=new Map(),invalid=new Set(),cats=new Set();
+    d.rows.forEach((r,i)=>{
+      const g=+a.group>=0?r[a.group]:'Corpus',c=r[a.category];
+      if(!c||!g){issue(i,'Missing category or group');return;}
+      if(!counts.has(g))counts.set(g,new Map());
+      cats.add(c);const m=counts.get(g);m.set(c,(m.get(c)||0)+1);totals.set(g,(totals.get(g)||0)+1);
+      if(a.frequency==='Per 10,000 words'){const w=numeric(r,a.word);if(!(w>0)||denoms.has(g)&&denoms.get(g)!==w){invalid.add(g);issue(i,'Invalid or inconsistent word total for this group');}denoms.set(g,w);}
+    });
+    info.labels=[...cats];for(const [g,m] of counts){
+      const den=a.frequency==='Per 10,000 words'?denoms.get(g):totals.get(g);
+      const points=[];
+      info.labels.forEach((c,i)=>{const n=m.get(c)||0;const v=a.frequency==='Counts'?n:a.frequency==='Within-group %'?100*n/den:invalid.has(g)?NaN:10000*n/den;
+        add(g,[[c,labFmt(v)+' · count '+n+' / '+den+(a.frequency==='Per 10,000 words'?' words':' coded rows')]]);if(Number.isFinite(v))points.push([i,v]);});
+      info.series.push({key:g,points,kind:'bar'});
+    }
+    info.message='One row represents one coded occurrence. Percentages use all included codes within each group. For word rates, repeat the same full text word count on every row of that group.';
+    return info;
+  }
+  const groups=new Map(),measurements=[...new Set([+a.y,...(a.mode===labModes[0]?a.more.map(Number):[])])];
+  d.rows.forEach((r,i)=>{
+    const x=numeric(r,a.x),g=+a.group>=0?r[a.group]:'';
+    if(+a.group>=0&&!g){issue(i,'Missing group');return;}
+    for(const j of measurements){
+      const y=numeric(r,j),needsX=![labModes[2],labModes[4]].includes(a.mode);
+      if(!Number.isFinite(y)||needsX&&!Number.isFinite(x)){issue(i,'Missing or nonnumeric '+(!Number.isFinite(y)?d.headers[j]:d.headers[a.x]));continue;}
+      const key=g?(measurements.length>1?g+' · '+d.headers[j]:g):d.headers[j];
+      if(!groups.has(key))groups.set(key,[]);groups.get(key).push([x,y,i]);
+    }
+  });
+  const summaries=new Map();
+  if(a.mode===labModes[4]){
+    const all=[...groups.values()].flat().map(p=>p[1]);if(!all.length)return info;
+    const min=Math.min(...all),max=Math.max(...all),bins=Math.min(40,Math.ceil(Math.sqrt(all.length))),step=(max-min||1)/bins;
+    info.xname=d.headers[a.y];info.yname='Frequency';info.categorical=true;
+    info.labels=Array.from({length:bins},(_,i)=>labFmt(min+i*step)+'–'+labFmt(min+(i+1)*step));
+    for(const [key,p] of groups){const v=p.map(r=>r[1]),s=labSummary(v),counts=Array(bins).fill(0);v.forEach(z=>counts[Math.min(bins-1,Math.floor((z-min)/step))]++);
+      info.series.push({key,kind:'bar',points:counts.map((n,i)=>[i,n])});add(key,[['N',s.n],['Mean',s.mean],['Sample SD',s.sd],['Median',s.median],['Q1',s.q1],['Q3',s.q3],['Minimum',s.min],['Maximum',s.max]].map(([k,v])=>[k,labFmt(v)]));}
+    return info;
+  }
+  for(const [key,p] of groups){
+    if(a.mode===labModes[2]){
+      const s=labSummary(p.map(t=>t[1])),err=a.error==='SD'?s.sd:a.error==='SE'?s.se:labTCrit(s.n-1)*s.se;
+      summaries.set(key,s);info.categorical=true;info.xname=+a.group>=0?d.headers[a.group]:'Group';
+      info.series.push({key,kind:'mean',points:[[info.labels.length,s.mean]],error:err});info.labels.push(key);
+      add(key,[['N',s.n],['Mean',labFmt(s.mean)],[a.error,labFmt(err)]]);continue;
+    }
+    if(a.mode===labModes[1]){
+      const delta=p.map(([measured,pred])=>pred-measured);
+      add(key,[['Matched rows',p.length],['RMSE',labFmt(Math.sqrt(labMean(delta.map(v=>v*v))))],['MAE',labFmt(labMean(delta.map(Math.abs)))],['Mean bias (prediction − measurement)',labFmt(labMean(delta))]]);
+      info.series.push({key,points:p,kind:'Scatter',identity:true});info.message='Each row must contain a matched measurement (X) and prediction (Y). The dashed diagonal marks exact agreement.';continue;
+    }
+    if(a.mode===labModes[3]){
+      const x=p.map(t=>t[0]),y=p.map(t=>t[1]),r=labCorrelation(x,y),z=Math.atanh(r),delta=1.96/Math.sqrt(p.length-3);
+      add(key,[['Complete pairs',p.length],['Pearson r',labFmt(r)],['Pearson 95% CI (Fisher z)',p.length>3?labFmt(Math.tanh(z-delta))+' to '+labFmt(Math.tanh(z+delta)):'—'],['Spearman ρ (average ranks)',labFmt(labCorrelation(labRank(x),labRank(y)))]]);
+      info.series.push({key,points:p,kind:'Scatter'});info.message='Pearson measures linear association. Spearman measures monotonic association. The Pearson interval assumes independent pairs and approximate bivariate normality.';continue;
+    }
+    const series={key,points:p,kind:a.type};info.series.push(series);
+    try{
+      const model=labRegression(p,a.method);add(key,model.stats);
+      const eligible=new Set(model.p);p.forEach(t=>{if(!eligible.has(t))issue(t[2],'Outside '+a.method+' model domain');});
+      if(a.type==='Residuals'){series.points=model.residual;info.yname='Residual (observed − fitted)';}
+      else if(a.fit){const xs=model.p.map(t=>t[0]),lo=Math.min(...xs),hi=Math.max(...xs);series.curve=Array.from({length:101},(_,i)=>{const x=lo+(hi-lo)*i/100;return [x,model.predict(x)];});}
+    }catch(e){add(key,[['Model unavailable',e.message]]);if(a.type==='Residuals')series.points=[];}
+    info.message='Coefficients include pointwise 95% t intervals when residual degrees of freedom permit. Inference assumes independent errors with constant variance and approximate normality on the fitted scale. '+({Exponential:'Model: ln(Y) = b₀ + b₁X; Y must be positive.',Power:'Model: ln(Y) = b₀ + b₁ln(X); both variables must be positive.',Logarithmic:'Model: Y = b₀ + b₁ln(X); X must be positive.'}[a.method]||'Polynomial terms use the original X units.');
+  }
+  if(a.mode===labModes[2]){
+    const keys=[...summaries.keys()],g1=keys.includes(a.groupA)?a.groupA:keys[0],g2=keys.includes(a.groupB)?a.groupB:keys[1],s=summaries.get(g1),t=summaries.get(g2);
+    info.groupKeys=keys;info.message='Error bars show '+a.error+'. Welch’s comparison assumes independent observations in two groups. The difference is first group minus second group.';
+    if(s&&t&&g1!==g2&&s.n>1&&t.n>1){const v=s.se**2,w=t.se**2,df=(v+w)**2/(v*v/(s.n-1)+w*w/(t.n-1)),se=Math.sqrt(v+w),diff=s.mean-t.mean,T=diff/se,margin=labTCrit(df)*se;
+      add(g1+' − '+g2,[['Mean difference',labFmt(diff)],['95% Welch CI',labFmt(diff-margin)+' to '+labFmt(diff+margin)],['Welch t',labFmt(T)],['Degrees of freedom',labFmt(df)],['Two-sided p',labFmt(labBeta(df/2,.5,df/(df+T*T)))]]);}
+  }
+  return info;
+}
+function labStyle(a,key,i){
+  const s=a.styles[key]||{};
+  return {geometry:s.geometry||'Use chart setting',label:s.label||key,color:a.gray?['#202020','#656565','#444444','#888888'][i%4]:/^#[0-9a-f]{6}$/i.test(s.color)?s.color:labPalette[i%labPalette.length],dash:s.dash||['Solid','Dashed','Dotted'][i%3],marker:s.marker||['Circle','Square','Triangle','Diamond'][i%4],weight:Math.max(.4,Math.min(6,Number(s.weight)||1.6))};
+}
+function labFigure(a,m){
+  const W=Math.round(a.width*96/25.4),H=Math.round(a.height*96/25.4),fs=+a.size*96/72;
+  const cat=m.categorical, logX=!cat&&a.logx,logY=a.logy, ncat=Math.min(30,m.labels.length);
+  const visible=(x,y)=>Number.isFinite(x)&&Number.isFinite(y)&&(!logX||x>0)&&(!logY||y>0)&&(!cat||x<ncat);
+  const all=m.series.flatMap(s=>[...s.points,...(s.curve||[]),...(Number.isFinite(s.error)?s.points.flatMap(([x,y])=>[[x,y-s.error],[x,y+s.error]]):[])]).filter(([x,y])=>visible(x,y));
+  if(!all.length)throw Error('No plottable observations. Check the column choices and axis scales.');
+  let xl=Infinity,xh=-Infinity,yl=Infinity,yh=-Infinity;
+  for(const [x,y] of all){xl=Math.min(xl,x);xh=Math.max(xh,x);yl=Math.min(yl,y);yh=Math.max(yh,y);}
+  if(cat){xl=-.5;xh=ncat-.5;if(!logY){yl=Math.min(yl,0);yh=Math.max(yh,0);}}
+  const bounds=(lo,hi,vmin,vmax,log,categorical=false)=>{
+    const tr=log?Math.log10:x=>x, un=log?x=>10**x:x=>x;
+    let l=tr(lo),h=tr(hi),pad=(h-l)*.055||.5;
+    if(!categorical){l-=pad;h+=pad;}
+    if(vmin!=='')l=tr(+vmin);if(vmax!=='')h=tr(+vmax);
+    if(!Number.isFinite(l+h)||h<=l)throw Error('Axis limits must increase. Logarithmic limits must be positive.');
+    return [l,h,un,tr];
   };
-  const xm=mean(pairs.map(p=>p[0])), ym=mean(pairs.map(p=>p[1]));
-  let xx=0,xy=0,yy=0;
-  for(const [x,y] of pairs){xx+=(x-xm)**2;xy+=(x-xm)*(y-ym);yy+=(y-ym)**2;}
-  const slope=xx>0?xy/xx:NaN, intercept=ym-slope*xm;
-  const r=xx>0 && yy>0?Math.max(-1,Math.min(1,xy/Math.sqrt(xx)/Math.sqrt(yy))):NaN;
-  return {ys,pairs,slope,intercept,stats:{
-    'Valid Y values':ys.length,'Missing or nonnumeric Y':data.rows.length-ys.length,
-    'Mean':avg,'Median':quantile(.5),'Sample SD':ys.length>1?Math.sqrt(ys.reduce((s,y)=>s+(y-avg)**2,0)/(ys.length-1)):NaN,
-    'Minimum':ys[0],'Maximum':ys.at(-1),'First quartile':quantile(.25),'Third quartile':quantile(.75),
-    'Valid X–Y pairs':pairs.length,'Pearson r':r,'OLS slope':slope,'OLS intercept':intercept,'R²':r*r
-  }};
+  const [x0,x1,ux,tx]=bounds(xl,xh,cat?'':a.xmin,cat?'':a.xmax,logX,cat);
+  const [y0,y1,uy,ty]=bounds(yl,yh,a.ymin,a.ymax,logY);
+  const left=fs*5.1,right=W-fs*1.3,top=fs*3.7,bottom=H-fs*(cat?7.3:4.8)-Math.ceil(m.series.length/3)*fs*1.5;
+  if(right-left<65||bottom-top<45)throw Error('Increase figure dimensions or reduce the font size for this legend.');
+  const X=x=>left+(tx(x)-x0)/(x1-x0)*(right-left),Y=y=>bottom-(ty(y)-y0)/(y1-y0)*(bottom-top);
+  const line=(x,y,x2,y2,attrs)=>'<line x1="'+x+'" y1="'+y+'" x2="'+x2+'" y2="'+y2+'" '+attrs+'/>';
+  const txt=(x,y,s,attrs='')=>'<text x="'+x+'" y="'+y+'" '+attrs+'>'+esc(s)+'</text>';
+  const mark=(x,y,style)=>{
+    const r=fs*.25,c='fill="'+style.color+'"';
+    if(style.marker==='None')return '';
+    if(style.marker==='Square')return '<rect x="'+(x-r)+'" y="'+(y-r)+'" width="'+2*r+'" height="'+2*r+'" '+c+'/>';
+    if(style.marker==='Circle')return '<circle cx="'+x+'" cy="'+y+'" r="'+r+'" '+c+'/>';
+    const p=style.marker==='Triangle'?[[0,-r],[r,r],[-r,r]]:[[0,-r],[r,0],[0,r],[-r,0]];
+    return '<polygon points="'+p.map(([u,v])=>[x+u,y+v].join(',')).join(' ')+'" '+c+'/>';
+  };
+  const ticks=(l,h,step,un)=>{
+    if(step==='')return Array.from({length:6},(_,i)=>un(l+(h-l)*i/5));
+    const s=+step,start=Math.ceil(l/s)*s;if(!(s>0)||((h-start)/s)>100)throw Error('Choose a positive tick interval producing at most 100 ticks.');
+    return Array.from({length:Math.max(0,Math.floor((h-start)/s+1e-9)+1)},(_,i)=>un(start+i*s));
+  };
+  let content=txt(W/2,fs*1.85,a.title,'text-anchor="middle" font-weight="bold" font-size="'+fs*1.25+'"');
+  for(const y of ticks(y0,y1,a.ytick,uy)){const py=Y(y);if(a.grid)content+=line(left,py,right,py,'stroke="#dce4e4"');content+=txt(left-6,py+fs*.32,labFmt(y),'text-anchor="end"');}
+  for(const x of cat?Array.from({length:ncat},(_,i)=>i):ticks(x0,x1,a.xtick,ux)){
+    const px=X(x),py=bottom+fs*1.2,label=cat?m.labels[x]:labFmt(x);
+    content+=txt(px,py,cat&&label.length>14?label.slice(0,13)+'…':label,cat?'transform="rotate(-35 '+px+' '+py+')" text-anchor="end"':'text-anchor="middle"');
+  }
+  content+=line(left,bottom,right,bottom,'stroke="#485858"')+line(left,top,left,bottom,'stroke="#485858"');
+  let ink='';const dash={Solid:'',Dashed:'7 4',Dotted:'2 3'};
+  function path(points,stroke,pattern,w){let d='',start=true;for(const [x,y] of points){if(!visible(x,y)){start=true;continue;}d+=(start?'M':'L')+X(x).toFixed(2)+' '+Y(y).toFixed(2)+' ';start=false;}return '<path d="'+d+'" fill="none" stroke="'+stroke+'" stroke-width="'+w+'" stroke-dasharray="'+pattern+'"/>';}
+  m.series.forEach((s,i)=>{
+    const st=labStyle(a,s.key,i),pts=s.points.filter(([x,y])=>visible(x,y));
+    if((['Line only','Line and markers'].includes(st.geometry)||(st.geometry==='Use chart setting'&&s.kind==='Line'))&&!cat)ink+=path(s.points,st.color,dash[st.dash],st.weight);
+    if(s.identity)ink+=path([[ux(x0),ux(x0)],[ux(x1),ux(x1)]],'#777','5 4',1);
+    if(s.curve)ink+=path(s.curve,st.color,dash[st.dash]||'7 4',st.weight);
+    for(const [x,y] of pts){const px=X(x),py=Y(y);
+      if(s.kind==='bar'){const width=(right-left)/ncat*.8/m.series.length,base=logY?bottom:Y(0);ink+='<rect x="'+(px-width*m.series.length/2+i*width)+'" y="'+Math.min(py,base)+'" width="'+width+'" height="'+Math.abs(base-py)+'" fill="'+st.color+'"/>';}
+      else {if(st.geometry!=='Line only'||cat)ink+=mark(px,py,st);if(s.kind==='mean'&&Number.isFinite(s.error)&&(!logY||y-s.error>0)){const y1=Y(y-s.error),y2=Y(y+s.error),attr='stroke="'+st.color+'"';ink+=line(px,y1,px,y2,attr)+line(px-4,y1,px+4,y1,attr)+line(px-4,y2,px+4,y2,attr);}}
+    }
+    const lx=left+(i%3)*(right-left)/3,ly=H-fs*(.8+1.5*(Math.ceil(m.series.length/3)-1-Math.floor(i/3)));
+    content+=line(lx,ly-3,lx+18,ly-3,'stroke="'+st.color+'" stroke-width="'+st.weight+'" stroke-dasharray="'+dash[st.dash]+'"')+mark(lx+9,ly-3,st)+txt(lx+22,ly,st.label);
+  });
+  const axis=(s,col)=>s+(a.units[col]?' ('+a.units[col]+')':'');
+  content+=txt((left+right)/2,bottom+fs*(cat?5.9:3.2),a.xlabel||axis(m.xname||'',a.mode===labModes[4]?a.y:a.x),'text-anchor="middle"')+
+    txt(0,0,a.ylabel||(cat&&a.mode!==labModes[2]?m.yname:axis(m.yname||'',a.y)),'transform="translate('+fs+' '+((top+bottom)/2)+') rotate(-90)" text-anchor="middle"');
+  return '<svg id="analysis-svg" role="img" aria-label="'+esc(a.title)+'" xmlns="http://www.w3.org/2000/svg" width="'+a.width+'mm" height="'+a.height+'mm" viewBox="0 0 '+W+' '+H+'" font-family="'+esc(a.font)+'" font-size="'+fs+'" fill="#273738"><rect width="100%" height="100%" fill="white"/><defs><clipPath id="lab-clip"><rect x="'+left+'" y="'+top+'" width="'+(right-left)+'" height="'+(bottom-top)+'"/></clipPath></defs>'+content+'<g clip-path="url(#lab-clip)">'+ink+'</g></svg>';
 }
-const analysisNumber=n=>Number.isFinite(n)?String(Number(n.toPrecision(5))):'—';
-
-function analysisFigure(a,data,m) {
-  const hist=a.type==='Histogram';
-  let points=hist?m.ys.map(y=>[y,0]):m.pairs;
-  if(!points.length) return '<p>No numeric observations for these columns.</p>';
-  let xs=points.map(p=>p[0]), ys=points.map(p=>p[1]);
-  let xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(...ys), ymax=Math.max(...ys);
-  if(xmax===xmin){const pad=Math.abs(xmin)*.05||.5;xmin-=pad;xmax+=pad;}
-  let bars=[];
-  if(hist){
-    const bins=Math.min(50,Math.ceil(Math.sqrt(xs.length)));
-    bars=Array(bins).fill(0);
-    xs.forEach(x=>bars[Math.min(bins-1,Math.floor((x-xmin)/(xmax-xmin)*bins))]++);
-    ymin=0; ymax=Math.max(...bars);
-  }
-  if(ymax===ymin){const pad=Math.abs(ymin)*.05||.5;ymin-=pad;ymax+=pad;}
-  if(!hist){const pad=(ymax-ymin)*.06; ymin-=pad; ymax+=pad;}
-  const X=x=>100+590*(x-xmin)/(xmax-xmin), Y=y=>325-245*(y-ymin)/(ymax-ymin);
-  const label=(x,y,s,attrs='')=>'<text x="'+x+'" y="'+y+'" text-anchor="middle" '+attrs+'>'+esc(s)+'</text>';
-  const line=(x1,y1,x2,y2,color,extra='')=>'<line x1="'+x1+'" x2="'+x2+'" y1="'+y1+'" y2="'+y2+'" stroke="'+color+'" '+extra+'/>';
-  let marks='';
-  for(let i=0;i<=5;i++){
-    const t=i/5, x=100+590*t,y=325-245*t;
-    if(a.grid) marks+=line(100,y,690,y,'#dce4e4');
-    marks+=label(x,347,analysisNumber(xmin+t*(xmax-xmin)))+
-      '<text x="89" y="'+(y+4)+'" text-anchor="end">'+analysisNumber(ymin+t*(ymax-ymin))+'</text>';
-  }
-  marks+=line(100,325,690,325,'#657879')+line(100,80,100,325,'#657879');
-  if(hist) bars.forEach((n,i)=>{const w=590/bars.length;marks+='<rect x="'+(100+i*w)+'" y="'+Y(n)+'" width="'+(w-.8)+'" height="'+(325-Y(n))+'" fill="'+a.color+'"><title>'+n+' observations</title></rect>';});
-  else {
-    if(a.type==='Line') marks+='<polyline fill="none" stroke="'+a.color+'" stroke-width="2" points="'+points.map(([x,y])=>X(x)+','+Y(y)).join(' ')+'"/>';
-    if(a.fit && Number.isFinite(m.slope)) marks+=line(100,Y(m.slope*xmin+m.intercept),690,Y(m.slope*xmax+m.intercept),'#a25c30','clip-path="url(#rf-plot-area)" stroke-width="2" stroke-dasharray="7 5"');
-    marks+=points.map(([x,y])=>'<circle cx="'+X(x)+'" cy="'+Y(y)+'" r="3.4" fill="'+a.color+'"><title>'+x+', '+y+'</title></circle>').join('');
-  }
-  return '<svg id="analysis-svg" xmlns="http://www.w3.org/2000/svg" width="740" height="422" viewBox="0 0 740 422" role="img" aria-label="'+esc(a.title||'Data figure')+'" font-family="'+a.font+'" font-size="12" fill="#253638"><rect width="740" height="422" fill="white"/><defs><clipPath id="rf-plot-area"><rect x="100" y="80" width="590" height="245"/></clipPath></defs>'+
-    label(370,34,a.title,'font-size="21" font-weight="600"')+marks+
-    label(395,379,a.xlabel||data.headers[hist?a.y:a.x],'font-size="15"')+
-    label(0,0,a.ylabel||(hist?'Frequency':data.headers[a.y]),'transform="translate(24 202) rotate(-90)" font-size="15"')+
-    label(395,406,(hist?xs.length+' observations':points.length+' paired observations')+(!hist && a.fit && Number.isFinite(m.slope)?'   ·   Dashed line: ordinary least squares':''),'fill="#55686a"')+'</svg>';
+function labOptions(items,current){
+  return items.map(item=>{const [v,t]=Array.isArray(item)?item:[item,item];return '<option value="'+esc(v)+'" '+(String(current)===String(v)?'selected':'')+'>'+esc(t)+'</option>';}).join('');
 }
-
-function analysisPage() {
-  const a=analysisDraft(),data=analysisRows(a.csv);
-  const select=(key,caption,choices)=>'<label>'+caption+'<select class="field" data-analysis="'+key+'">'+choices.map(([v,t])=>'<option value="'+esc(v)+'" '+(String(v)===String(a[key])?'selected':'')+'>'+esc(t)+'</option>').join('')+'</select></label>';
-  const input=(key,caption,type='text')=>'<label>'+caption+'<input class="field" type="'+type+'" data-analysis="'+key+'" value="'+esc(a[key])+'" maxlength="120"></label>';
-  const check=(key,caption)=>'<label><input type="checkbox" data-analysis="'+key+'" '+(a[key]?'checked':'')+'> '+caption+'</label>';
-  const columns=data.headers.map((name,i)=>[i,name||'Column '+(i+1)]);
-  const choices=arr=>arr.map(v=>[v,v]);
-  return pageHeading('RESEARCH METHODS','Data analysis','Explore a dataset, inspect the calculations and prepare a figure.')+
-    '<div id="analysis-lab"><section class="card panel"><h2>Dataset</h2><p>'+esc(a.name)+' · '+data.rows.length+' rows · '+data.headers.length+' columns</p><label>Import CSV or TSV <input id="analysis-file" type="file" accept=".csv,.tsv,.txt"></label><details><summary>Paste or edit data</summary><label>Delimited data with column headings<textarea class="field" id="analysis-data" rows="7">'+esc(a.pending??a.csv)+'</textarea></label><button class="button secondary" id="analysis-apply">Apply data</button></details></section>'+
-    '<div class="analysis-layout"><section class="card panel analysis-controls"><h2>Figure settings</h2>'+
-    select('type','Chart type',choices(['Scatter','Line','Histogram']))+select('x','X column',columns)+select('y','Y column · histogram variable',columns)+input('title','Figure title')+input('xlabel','Horizontal axis label')+input('ylabel','Vertical axis label')+input('color','Series colour','color')+select('font','Typeface',choices(['Arial','Georgia','Verdana']))+check('grid','Horizontal gridlines')+check('fit','Linear fit on paired charts')+'</section>'+
-    '<section class="card panel"><h2>Figure preview</h2><div id="analysis-figure"></div><button class="button secondary" id="analysis-export">Download editable SVG</button><p class="small-text muted">SVG preserves text and shapes for editing in a vector editor.</p></section></div><section class="card panel"><h2>Statistical summary</h2><div id="analysis-stats"></div></section></div>';
+function labTable(headers,rows){
+  return '<div class="lab-scroll"><table class="task-table"><thead><tr>'+headers.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>'<td>'+esc(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
+}
+const labSaved=f=>/\.analysis\.txt$/i.test(f.original_name);
+const labSource=f=>/\.(csv|tsv|xlsx)$/i.test(f.original_name);
+function labFileButton(f){return labSource(f)||labSaved(f)?'<button class="tiny-btn" data-lab-file="'+Number(f.id)+'">Open in Data analysis</button>':'';}
+let labWorkbook=null;
+function analysisPage(){
+  const a=analysisDraft(),d=analysisRows(a.csv),cols=d.headers.map((h,i)=>[i,h||'Column '+(i+1)]);
+  const select=(key,label,items)=>'<label>'+label+'<select class="field" data-lab="'+key+'">'+labOptions(items,a[key])+'</select></label>';
+  const input=(key,label,type='text',limits='')=>'<label>'+label+'<input class="field" data-lab="'+key+'" type="'+type+'" '+limits+' value="'+esc(a[key])+'"></label>';
+  const check=(key,label)=>'<label><input type="checkbox" data-lab="'+key+'" '+(a[key]?'checked':'')+'> '+label+'</label>';
+  const button=(key,label)=>'<button type="button" class="tiny-btn" data-lab-action="'+key+'">'+label+'</button>';
+  const files=state.data.files, saved=files.filter(labSaved),source=files.filter(labSource),write=state.workspace?.role!=='viewer',human=a.mode===labModes[5],trend=a.mode===labModes[0];
+  const uniqueGroups=+a.group>=0?[...new Set(d.rows.map(r=>r[a.group]).filter(Boolean))]:[];
+  return pageHeading('RESEARCH METHODS','Data analysis','Prepare a dataset, compare evidence, and save reproducible figures.')+
+    '<div id="analysis-lab"><section class="card panel"><div class="lab-head"><h2>Analysis workspace</h2><span>'+esc(a.source)+' · '+d.rows.length+' rows</span></div><div class="lab-fields">'+input('name','Analysis name')+
+    '<label>Saved analyses<select id="lab-saved" class="field">'+labOptions([['','Choose a version…'],...saved.map(f=>[f.id,f.original_name.replace(/\.analysis\.txt$/i,'')])],'')+'</select></label>'+
+    '<label>Research library<select id="lab-source" class="field">'+labOptions([['','Open dataset…'],...source.map(f=>[f.id,f.original_name])],'')+'</select></label>'+
+    '<label>Import CSV, TSV or Excel<input type="file" id="lab-upload" accept=".csv,.tsv,.xlsx,.txt"></label></div><div class="rf-tools">'+(write?button('save','Save version'):'')+button('duplicate','Duplicate analysis')+button('human','Load humanities example')+
+    (a.sourceId?'<button class="tiny-btn" data-preview="'+Number(a.sourceId)+'">View source record</button>':'')+'</div><details><summary>Paste or edit data</summary><textarea id="lab-csv" class="field" rows="6" aria-label="Delimited dataset">'+esc(a.pending??a.csv)+'</textarea>'+button('apply','Apply data')+'</details>'+
+    (labWorkbook?.owner===a?'<div class="lab-fields"><label>Excel sheet<select id="lab-sheet" class="field">'+labOptions(labWorkbook.sheets.map((s,i)=>[i,s.name]),labWorkbook.index)+'</select></label><label>Header row<input class="field" id="lab-header" type="number" min="1" value="'+labWorkbook.header+'"></label>'+button('sheet','Use sheet and header')+'</div>':'')+
+    '</section><details class="card panel"><summary>Data preview and quality checks</summary><div id="lab-quality"></div></details>'+
+    '<section class="card panel"><h2>Research question</h2><div class="lab-fields">'+select('mode','Analysis',labModes)+
+    (trend?select('method','Regression model',labMethods)+select('type','Display',['Scatter','Line','Residuals']):'')+
+    (human?select('category','Coded category',cols)+select('frequency','Frequency measure',['Counts','Within-group %','Per 10,000 words'])+(a.frequency==='Per 10,000 words'?select('word','Word total column',[[-1,'Select word totals'],...cols]):''):
+    (![labModes[2],labModes[4]].includes(a.mode)?select('x',a.mode===labModes[1]?'Measured column':'X column',cols):'')+select('y',a.mode===labModes[1]?'Predicted column':'Response / Y column',cols))+
+    select('group',human?'Text or comparison group':'Group series by',[[-1,'All rows'],...cols])+
+    (a.mode===labModes[2]?select('error','Error bars',['95% CI','SD','SE'])+(uniqueGroups.length>1?select('groupA','First group',[['','First available'],...uniqueGroups])+select('groupB','Second group',[['','Second available'],...uniqueGroups]):''):'')+'</div>'+
+    (trend?'<details><summary>Additional Y series</summary>'+cols.filter(([i])=>i!==+a.y).map(([i,h])=>'<label class="lab-inline"><input type="checkbox" data-lab-more="'+i+'" '+(a.more.includes(i)?'checked':'')+'> '+esc(h)+'</label>').join('')+'</details>':'')+'</section>'+
+    '<section class="card panel"><h2>Figure</h2><div id="lab-plot"></div><div class="rf-tools">'+button('svg','Editable SVG')+button('png300','PNG · 300 DPI')+button('png600','PNG · 600 DPI')+button('pdf','Print / PDF')+'</div><p id="lab-method" class="small-text"></p></section>'+
+    '<details class="card panel"><summary>Publication settings and series styles</summary><div class="lab-fields">'+input('title','Figure title')+input('xlabel','X axis label')+input('ylabel','Y axis label')+select('font','Typeface',['Arial','Georgia','Verdana'])+input('size','Font (pt)','number','min="6" max="24"')+input('width','Width (mm)','number','min="60" max="400"')+input('height','Height (mm)','number','min="50" max="400"')+
+    ['xmin','xmax','ymin','ymax','xtick','ytick'].map((k,i)=>input(k,['X minimum','X maximum','Y minimum','Y maximum','X tick interval','Y tick interval'][i],'number','step="any" placeholder="Automatic"')).join('')+check('logx','Log X')+check('logy','Log Y')+check('gray','Grayscale')+check('grid','Gridlines')+(trend?check('fit','Show fitted curves'):'')+'</div><p class="small-text">Log tick intervals are in powers of ten. Category axes use the dataset order.</p><div id="lab-styles"></div></details>'+
+    '<section class="card panel"><div class="lab-head"><h2>Results</h2>'+button('results','Download results CSV')+'</div><div id="lab-results"></div></section>'+
+    (write?'<section class="card panel"><h2>Research notebook</h2>'+input('caption','Figure caption')+button('notebook','Save figure and results to notebook')+'</section>':'')+'</div>';
+}
+function labQuality(a,d,m){
+  const found=new Set();let dup=0;for(const r of d.rows){const k=JSON.stringify(r);if(found.has(k))dup++;found.add(k);}
+  const types=['Auto','Numeric','Number (grouped)','Text'];
+  return '<p>'+dup+' repeated rows (retained) · '+new Set(m.issues.map(i=>i[0])).size+' rows flagged for the selected analysis.</p><div class="lab-scroll"><table class="task-table"><tr><th>Column</th><th>Detected</th><th>Blank</th><th>Interpret as</th><th>Unit</th></tr>'+d.headers.map((h,i)=>{
+    const filled=d.rows.map(r=>r[i]).filter(Boolean),n=filled.filter(s=>Number.isFinite(labNum(s))).length;
+    return '<tr><td>'+esc(h)+'</td><td>'+(n===0?'Text':n===filled.length?'Numeric':'Mixed')+'</td><td>'+(d.rows.length-filled.length)+'</td><td><select data-lab-type="'+i+'" aria-label="Type for '+esc(h)+'">'+labOptions(types,a.types[i]||'Auto')+'</select></td><td><input data-lab-unit="'+i+'" aria-label="Units for '+esc(h)+'" value="'+esc(a.units[i]||'')+'"></td></tr>';}).join('')+'</table></div><h3>First '+Math.min(20,d.rows.length)+' rows</h3>'+labTable(d.headers,d.rows.slice(0,20))+(m.issues.length?'<h3>Flagged rows</h3>'+labTable(['Spreadsheet row','Reason'],m.issues.slice(0,100))+(m.issues.length>100?'<button class="tiny-btn" data-lab-action="issues">Download all flagged rows</button>':''):'');
 }
 function drawAnalysis(){
-  const a=analysisDraft(),data=analysisRows(a.csv),model=analysisModel(data,a);
-  $('analysis-figure').innerHTML=analysisFigure(a,data,model);
-  $('analysis-export').disabled=!$('analysis-svg');
-  $('analysis-stats').innerHTML=Object.entries(model.stats).map(([key,v])=>'<div><small>'+key+'</small><strong>'+analysisNumber(v)+'</strong></div>').join('');
+  if(!$('lab-plot'))return;
+  const a=analysisDraft(),d=analysisRows(a.csv),m=labCompute(a,d);
+  try{$('lab-plot').innerHTML=labFigure(a,m);}catch(e){$('lab-plot').textContent=e.message;}
+  $('lab-method').textContent=m.message+(m.labels.length>30?' Figure displays the first 30 categories. All categories are in the results export.':'')+(a.logx||a.logy?' Log axes display positive values only.':'');
+  $('lab-results').innerHTML=labTable(['Series / group','Measure','Result'],m.results.slice(0,250))+(m.results.length>250?'<p>First 250 entries shown. Download the full table above.</p>':'');
+  $('lab-quality').innerHTML=labQuality(a,d,m);
+  $('lab-styles').innerHTML=m.series.slice(0,60).map((s,i)=>{const st=labStyle(a,s.key,i),attr=' data-series="'+esc(s.key)+'" ';return '<fieldset><legend>'+esc(s.key)+'</legend><div class="lab-fields"><label>Legend label<input class="field"'+attr+'data-style="label" value="'+esc(st.label)+'"></label><label>Colour<input type="color"'+attr+'data-style="color" value="'+st.color+'"></label><label>Series display<select'+attr+'data-style="geometry">'+labOptions(['Use chart setting','Markers only','Line only','Line and markers'],st.geometry)+'</select></label><label>Stroke<select'+attr+'data-style="dash">'+labOptions(['Solid','Dashed','Dotted'],st.dash)+'</select></label><label>Marker<select'+attr+'data-style="marker">'+labOptions(['Circle','Square','Triangle','Diamond','None'],st.marker)+'</select></label><label>Line width<input type="number" min=".4" max="6" step=".2"'+attr+'data-style="weight" value="'+st.weight+'"></label></div></fieldset>';}).join('');
 }
-function applyAnalysis(text,name) {
-  const data=analysisRows(text),a=analysisDraft();
-  Object.assign(a,{csv:text,name,x:0,y:Math.min(1,data.headers.length-1),title:name,xlabel:'',ylabel:''});
+async function labReadExcel(file){
+  const buf=await file.arrayBuffer(),v=new DataView(buf),bytes=new Uint8Array(buf),decode=new TextDecoder();
+  let end=buf.byteLength-22;while(end>=Math.max(0,buf.byteLength-65557)&&v.getUint32(end,true)!==0x06054b50)end--;
+  if(end<0||v.getUint32(end,true)!==0x06054b50)throw Error('Choose a valid .xlsx workbook.');
+  let ptr=v.getUint32(end+16,true);const entries=new Map();
+  for(let i=0;i<v.getUint16(end+10,true);i++){
+    if(v.getUint32(ptr,true)!==0x02014b50)throw Error('Invalid workbook directory.');
+    const n=v.getUint16(ptr+28,true),name=decode.decode(bytes.subarray(ptr+46,ptr+46+n));
+    entries.set(name,[v.getUint32(ptr+42,true),v.getUint32(ptr+20,true),v.getUint32(ptr+24,true),v.getUint16(ptr+10,true)]);
+    ptr+=46+n+v.getUint16(ptr+30,true)+v.getUint16(ptr+32,true);
+  }
+  async function xml(name){
+    const e=entries.get(name);if(!e)throw Error('Workbook entry unavailable: '+name);
+    const [offset,len,size,method]=e;if(size>16e6||![0,8].includes(method))throw Error('Workbook sheet is too large or uses unsupported compression.');
+    const start=offset+30+v.getUint16(offset+26,true)+v.getUint16(offset+28,true);
+    let stream=new Blob([bytes.subarray(start,start+len)]).stream();if(method===8)stream=stream.pipeThrough(new DecompressionStream('deflate-raw'));
+    const reader=stream.getReader(),parts=[];let count=0;
+    for(;;){const {done,value}=await reader.read();if(done)break;count+=value.length;if(count>16e6){await reader.cancel();throw Error('Workbook XML exceeds 16 MB.');}parts.push(value);}
+    const doc=new DOMParser().parseFromString(await new Blob(parts).text(),'application/xml');if(doc.getElementsByTagName('parsererror').length)throw Error('Invalid workbook XML.');return doc;
+  }
+  const tags=(node,name)=>Array.from(node.getElementsByTagNameNS('*',name));
+  const workbook=await xml('xl/workbook.xml'),rels=tags(await xml('xl/_rels/workbook.xml.rels'),'Relationship');
+  const sheets=tags(workbook,'sheet').map(s=>{const id=s.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id'),r=rels.find(r=>r.getAttribute('Id')===id),target=r?.getAttribute('Target')||'';
+    return {name:s.getAttribute('name'),path:target.startsWith('/')?target.slice(1):'xl/'+target.replace(/^\.\//,'')};}).filter(s=>entries.has(s.path));
+  if(!sheets.length)throw Error('No worksheets found.');
+  const strings=entries.has('xl/sharedStrings.xml')?tags(await xml('xl/sharedStrings.xml'),'si').map(si=>tags(si,'t').map(n=>n.textContent).join('')):[];
+  return {sheets,async read(i,header){
+    const rows=tags(await xml(sheets[i].path),'row'),data=[];let columns=0;
+    if(!Number.isInteger(header)||header<1||!rows.some(r=>Number(r.getAttribute('r'))===header))throw Error('Select a populated header row.');
+    for(const row of rows){if(+row.getAttribute('r')<header)continue;const arr=[];
+      for(const c of tags(row,'c')){const letters=(c.getAttribute('r')||'').match(/^[A-Z]+/)?.[0]||'A';let index=0;for(const l of letters)index=index*26+l.charCodeAt(0)-64;
+        if(index>512)throw Error('Select a sheet with at most 512 columns.');
+        const type=c.getAttribute('t'),raw=tags(c,'v')[0]?.textContent??'';arr[index-1]=type==='s'?strings[+raw]??'':type==='inlineStr'?tags(c,'t').map(n=>n.textContent).join(''):raw;
+      }if(arr.some(v=>String(v).trim())){columns=Math.max(columns,arr.length);data.push(arr);}
+    }
+    if(data.length*columns>1e6)throw Error('Choose a smaller worksheet.');
+    return labCsv(data.map(r=>Array.from({length:columns},(_,i)=>r[i]??'')));
+  }};
+}
+function labLoadData(text,name,sourceId=0){
+  if(text.length>8e6)throw Error('Select a dataset under 8 MB.');
+  const d=analysisRows(text),a=analysisDraft();Object.assign(a,labDefault(),{csv:text,name,source:name,sourceId,title:name,y:Math.min(1,d.headers.length-1)});
   delete a.pending;render();
 }
-document.addEventListener('input',e=>{
-  if(e.target.id==='analysis-data') analysisDraft().pending=e.target.value;
-  const key=e.target.dataset.analysis;
-  if(!key)return;
-  analysisDraft()[key]=e.target.type==='checkbox'?e.target.checked:e.target.value;
-  drawAnalysis();
-});
+function labRestore(obj){
+  if(obj?.format!=='ResearchFlow analysis v2'||typeof obj.settings?.csv!=='string')throw Error('Unrecognised analysis snapshot.');
+  const s=obj.settings,d=analysisRows(s.csv),a=labDefault();
+  for(const key of Object.keys(a)){
+    if(typeof a[key]==='string'&&typeof s[key]==='string')a[key]=key==='csv'?s[key]:s[key].slice(0,2000);
+    if(typeof a[key]==='boolean'&&typeof s[key]==='boolean')a[key]=s[key];
+  }
+  const idx=(v,def)=>Number.isInteger(+v)&&+v>=0&&+v<d.headers.length?+v:def;
+  for(const k of ['x','y','category','group','word'])a[k]=idx(s[k],['group','word'].includes(k)?-1:0);
+  a.more=Array.isArray(s.more)?s.more.map(x=>idx(x,-1)).filter(x=>x>=0):[];
+  for(const [k,lo,hi] of [['width',60,400],['height',50,400],['size',6,24]])a[k]=Math.max(lo,Math.min(hi,labNum(s[k])||a[k]));
+  a.sourceId=Number(s.sourceId)||0;
+  for(const k of ['styles','units','types']){a[k]=Object.create(null);for(const [name,v] of Object.entries(s[k]||{})){if(['__proto__','constructor','prototype'].includes(name))continue;
+      if(k==='styles'){if(v&&typeof v==='object')a[k][name]=Object.fromEntries(Object.entries(v).filter(([key,val])=>['label','dash','marker','weight','color','geometry'].includes(key)&&['string','number'].includes(typeof val)));}
+      else if(typeof v==='string')a[k][name]=v.slice(0,200);}}
+  if(!labModes.includes(a.mode)||!labMethods.includes(a.method))throw Error('Unknown analysis method.');
+  Object.assign(analysisDraft(),a);delete analysisDraft().pending;
+}
+async function labOpen(file,id=0){
+  const a=analysisDraft();if(file.size>12e6)throw Error('Select a file under 12 MB.');
+  if(/\.xlsx$/i.test(file.name)){const w=await labReadExcel(file);if(analysisDraft()!==a)return;
+    labWorkbook={...w,owner:a,index:0,header:1,name:file.name,id};goto('analysis');toast('Choose the worksheet and header row, then use the sheet.');return;}
+  const text=await file.text();if(analysisDraft()!==a)return;
+  if(/\.analysis\.txt$/i.test(file.name)){labRestore(JSON.parse(text));labWorkbook=null;goto('analysis');}
+  else{labWorkbook=null;goto('analysis');labLoadData(text,file.name,id);}
+}
+async function labOpenId(id){
+  const a=analysisDraft(),f=state.data.files.find(f=>f.id===Number(id));if(!f)throw Error('File unavailable in this workspace.');
+  const response=await fetch('/api/files/'+f.id+'/download');if(!response.ok)throw Error('Could not open the workspace file.');
+  const blob=await response.blob();if(analysisDraft()===a)await labOpen(new File([blob],f.original_name),f.id);
+}
+const labStem=name=>String(name).replace(/[^\p{L}\p{N} ._-]/gu,'').trim().slice(0,65)||'Analysis';
+async function labUpload(blob,name){
+  const form=new FormData();form.append('file',new File([blob],name,{type:blob.type}));const r=await api('/files',{method:'POST',body:form,form:true});return r.id;
+}
+async function labSave(a){
+  const settings={...a};delete settings.pending;
+  const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+  return labUpload(new Blob([JSON.stringify({format:'ResearchFlow analysis v2',savedAt:stamp,settings})],{type:'text/plain'}),labStem(a.name)+' '+stamp+'.analysis.txt');
+}
+function labDownload(blob,name){
+  const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=name;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+function labSvgBlob(){const svg=$('analysis-svg');if(!svg)throw Error('Create a valid figure first.');return new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml;charset=utf-8'});}
+async function labPng(a,dpi){
+  const img=new Image(),url=URL.createObjectURL(labSvgBlob());
+  try{img.src=url;await img.decode();const canvas=document.createElement('canvas');canvas.width=Math.round(+a.width*dpi/25.4);canvas.height=Math.round(+a.height*dpi/25.4);
+    if(canvas.width*canvas.height>4e7)throw Error('Reduce the dimensions for this resolution.');
+    canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height);
+    const blob=await new Promise((ok,fail)=>canvas.toBlob(b=>b?ok(b):fail(Error('PNG export failed.')),'image/png'));
+    const bytes=new Uint8Array(await blob.arrayBuffer()),chunk=new Uint8Array(21),view=new DataView(chunk.buffer);view.setUint32(0,9);chunk.set([112,72,89,115],4);view.setUint32(8,Math.round(dpi/.0254));view.setUint32(12,Math.round(dpi/.0254));chunk[16]=1;
+    let crc=0xffffffff;for(const byte of chunk.slice(4,17)){crc^=byte;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}view.setUint32(17,(crc^0xffffffff)>>>0);
+    const parts=[bytes.slice(0,33),chunk],dv=new DataView(bytes.buffer);for(let i=33;i<bytes.length;){const n=dv.getUint32(i)+12;if(String.fromCharCode(...bytes.slice(i+4,i+8))!=='pHYs')parts.push(bytes.slice(i,i+n));i+=n;}return new Blob(parts,{type:'image/png'});
+  }finally{URL.revokeObjectURL(url);}
+}
+function labPrint(){
+  const svg=$('analysis-svg');if(!svg)throw Error('Create a figure first.');
+  const frame=document.createElement('iframe');frame.style.cssText='position:fixed;width:1px;height:1px;bottom:0;right:0;border:0';document.body.append(frame);
+  const doc=frame.contentDocument,style=doc.createElement('style');const a=analysisDraft();style.textContent='@page{size:'+a.width+'mm '+a.height+'mm;margin:0}body{margin:0}svg{display:block}';doc.head.append(style);doc.body.append(doc.importNode(svg,true));frame.contentWindow.addEventListener('afterprint',()=>frame.remove(),{once:true});frame.contentWindow.print();
+}
+function labUpdate(key,value){
+  const a=analysisDraft();a[key]=value;
+  if(['x','y','word','group','category'].includes(key))a[key]=Number(value);
+  if(['mode','group','y','frequency','method'].includes(key))render();else drawAnalysis();
+}
+document.addEventListener('input',e=>{if(e.target.id==='lab-csv')analysisDraft().pending=e.target.value;});
 document.addEventListener('change',async e=>{
-  if(e.target.id!=='analysis-file') return;
-  const file=e.target.files[0],draft=analysisDraft();
-  if(!file)return;
+  const el=e.target;if(!el.closest('#analysis-lab'))return;
   try{
-    if(file.size>5*1024*1024)throw Error('Choose a file under 5 MiB.');
-    const content=await file.text();
-    if(state.page==='analysis' && analysisDraft()===draft) applyAnalysis(content,file.name);
+    const a=analysisDraft(),d=el.dataset;
+    if(d.lab){if(el.type==='number'&&!el.checkValidity())return el.reportValidity();labUpdate(d.lab,el.type==='checkbox'?el.checked:el.value);}
+    else if(d.labMore!==undefined){a.more=a.more.filter(i=>i!==+d.labMore);if(el.checked)a.more.push(+d.labMore);drawAnalysis();}
+    else if(d.series!==undefined){a.styles=Object.assign(Object.create(null),a.styles);a.styles[d.series]={...Object.getOwnPropertyDescriptor(a.styles,d.series)?.value,[d.style]:el.value};drawAnalysis();}
+    else if(d.labType!==undefined){a.types[d.labType]=el.value;drawAnalysis();}
+    else if(d.labUnit!==undefined){a.units[d.labUnit]=el.value;drawAnalysis();}
+    else if(el.id==='lab-upload'&&el.files[0])await labOpen(el.files[0]);
+    else if(['lab-saved','lab-source'].includes(el.id)&&el.value)await labOpenId(el.value);
   }catch(err){toast(err.message,true);}
 });
-document.addEventListener('click',e=>{
-  if(e.target.id==='analysis-apply'){
-    try{applyAnalysis($('analysis-data').value,'Edited dataset');}catch(err){toast(err.message,true);}
-  }
-  if(e.target.id==='analysis-export'){
-    const svg=$('analysis-svg'); if(!svg)return;
-    const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml'}));
-    const link=document.createElement('a');link.href=url;link.download='research-figure.svg';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
-  }
+document.addEventListener('click',async e=>{
+  const btn=e.target.closest('[data-lab-action],[data-lab-file]');if(!btn)return;btn.disabled=true;
+  try{
+    if(btn.dataset.labFile){await labOpenId(btn.dataset.labFile);return;}
+    const a=analysisDraft(),act=btn.dataset.labAction,stem=labStem(a.name);
+    if(act==='apply'){labLoadData($('lab-csv').value,'Edited dataset',a.sourceId);return;}
+    if(act==='sheet'){const w=labWorkbook,index=+$('lab-sheet').value,header=+$('lab-header').value;
+      const text=await w.read(index,header);if(analysisDraft()!==a)return;w.index=index;w.header=header;labLoadData(text,w.name+' · '+w.sheets[index].name+' · row '+header,w.id);return;}
+    if(act==='human'){labLoadData('Text,Theme,Words\nText A,Education,2000\nText A,Education,2000\nText A,Labour,2000\nText B,Education,4000\nText B,Labour,4000\nText B,Labour,4000','Example · coded passages');Object.assign(a,{mode:labModes[5],category:1,group:0,word:2,title:'Themes across two texts'});render();return;}
+    if(act==='duplicate'){a.name+=' (copy)';render();toast('Copy ready. Save version to keep it.');return;}
+    if(act==='save'){await labSave(a);await reload();toast('Analysis version saved in the workspace.');return;}
+    const model=labCompute(a,analysisRows(a.csv));
+    if(act==='results'||act==='issues'){labDownload(new Blob([labCsv(act==='results'?[['Series','Measure','Result'],...model.results]:[['Row','Reason'],...model.issues])],{type:'text/csv'}),stem+'-'+act+'.csv');return;}
+    if(act==='svg'){labDownload(labSvgBlob(),stem+'.svg');return;}
+    if(act.startsWith('png')){labDownload(await labPng(a,Number(act.slice(3))),stem+'-'+act.slice(3)+'dpi.png');return;}
+    if(act==='pdf'){labPrint();return;}
+    if(act==='notebook'){
+      const cap=a.caption||a.title,stamp=Date.now(),png=await labPng(a,300);if(analysisDraft()!==a)return;
+      const snapshot=await labSave(a);if(analysisDraft()!==a)return;
+      const figure=await labUpload(png,stem+' figure '+stamp+'.png');if(analysisDraft()!==a)return;
+      const full=labCsv([['Series','Measure','Result'],...model.results]),tableText=model.results.slice(0,30).map(row=>'|'+row.map(x=>String(x).slice(0,60).replaceAll('|','¦')).join('|')+'|').join('\n');
+      const result=await labUpload(new Blob([full],{type:'text/csv'}),stem+' results '+stamp+'.csv');if(analysisDraft()!==a)return;
+      const blocks=[{type:'Text',value:cap+'\n[[file:'+figure+']]\nAnalysis version [[file:'+snapshot+']] · Full results [[file:'+result+']]'+(a.sourceId?' · Source [[cite:'+a.sourceId+']]':'')},{type:'Table',value:'|Series|Measure|Result|\n'+tableText}];
+      await api('/notes',{method:'POST',body:{body:serializeBlocks(blocks),sourceId:snapshot}});await reload();toast('Figure, caption and results saved to the notebook.');}
+  }catch(err){toast(err.message,true);}finally{btn.disabled=false;}
 });
 const analysisStyle=document.createElement('style');
-analysisStyle.textContent='#analysis-lab{display:grid;gap:16px}#analysis-lab h2{font-size:18px;margin:0 0 15px}.analysis-layout{display:grid;grid-template-columns:minmax(200px,1fr) minmax(0,3fr);gap:16px;align-items:start}.analysis-controls{display:grid;gap:10px}#analysis-lab label{font-size:13px;font-weight:550}#analysis-lab .field{display:block;width:100%;margin-top:4px}#analysis-lab details{margin-top:14px}#analysis-lab summary{cursor:pointer;margin-bottom:8px}#analysis-svg{width:100%;height:auto}#analysis-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px}#analysis-stats strong{display:block;font-size:19px;font-variant-numeric:tabular-nums}@media(max-width:850px){.analysis-layout{grid-template-columns:1fr}.analysis-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.analysis-controls h2{grid-column:1/-1}}';
+analysisStyle.textContent='#analysis-lab{display:grid;gap:16px}#analysis-lab h2{font-size:18px;margin:0 0 14px}#analysis-lab .lab-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}#analysis-lab .lab-head span{color:#526862;font-size:13px}.lab-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;align-items:end;margin:12px 0}#analysis-lab .field{display:block;width:100%;margin-top:4px}#analysis-lab label,#analysis-lab legend{font-size:13px}#analysis-lab summary{cursor:pointer;font-weight:600}#analysis-lab fieldset{border:1px solid #d8e1dd;margin:12px 0;padding:8px 12px;border-radius:8px}.lab-scroll{max-height:360px;overflow:auto}.lab-inline{display:inline-block;padding:.4rem}#lab-plot{overflow:auto;text-align:center}#analysis-svg{width:auto;height:auto;max-width:100%}#analysis-lab .rf-tools{margin-top:14px}#analysis-lab textarea{font-family:monospace}.lab-note-figure{display:block;width:min(100%,700px);height:auto}';
 document.head.append(analysisStyle);
 for(const sibling of document.querySelectorAll('button[data-page="activity"]')){
-  const tab=sibling.cloneNode(false);tab.dataset.page='analysis';tab.innerHTML='<span aria-hidden="true">∿</span> Data analysis';sibling.before(tab);
+ const tab=sibling.cloneNode(false);tab.dataset.page='analysis';tab.innerHTML='<span aria-hidden="true">∿</span> Data analysis';sibling.before(tab);
 }
 
 boot();
