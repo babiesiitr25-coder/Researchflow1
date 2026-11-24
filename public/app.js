@@ -314,7 +314,7 @@ function overviewPage() {
   const f = state.data.files;
   const wsName = state.workspace?.name || 'Shared research workspace';
   return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
- ${nextWorkPanel()}
+ ${nextWorkPanel()}${continuePanel()}
  <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
  <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Progress shows the share of tasks marked done.</p></section>
  <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Compare two primary sources">＋ Add reading task</button></div></section></div>
@@ -2619,4 +2619,31 @@ document.addEventListener('click',e=>{
   dialog.showModal();
 });
 analysisStyle.textContent+=`.lab-export summary{display:list-item;cursor:pointer}.lab-export[open]{flex:1 1 100%}#lab-note-preview{width:min(760px,96vw);max-height:92dvh;overflow:auto}#lab-preview-figure svg{display:block;max-width:100%;height:auto;margin:auto}#lab-preview-results .lab-scroll{max-height:210px}`;
+function personalKey(part){return 'rf.'+part+'.'+JSON.stringify([state.user.id,state.workspace?.id]);}
+function readPersonal(part,fallback){try{return JSON.parse(localStorage.getItem(personalKey(part)))??fallback;}catch{return fallback;}}
+function writePersonal(part,value){try{localStorage.setItem(personalKey(part),JSON.stringify(value));}catch{}}
+function rememberResearch(kind,id){
+  if(!state.user||!state.workspace||!id)return;
+  const recent=readPersonal('recent',[]).filter(r=>r.kind!==kind||r.id!==id);
+  writePersonal('recent',[{kind,id},...recent].slice(0,10));
+}
+function continuePanel(){
+  const a=analysisDraft(),items=[];
+  if(labHasLocal.has(a))items.push('<button class="tiny-btn" data-resume-draft>Device draft · '+esc(a.name)+'</button>');
+  readPersonal('recent',[]).forEach(({kind,id})=>{
+    const f=kind==='file'&&state.data.files.find(x=>x.id===id);
+    if(f&&labSaved(f))items.push('<button class="tiny-btn" data-lab-file="'+id+'">Workspace version · '+esc(f.original_name)+'</button>');
+    else if(['task','note','file'].includes(kind)){const link=recordLink(kind,id);if(link)items.push(link);}
+  });
+  return '<section class="card panel section-spacer"><h2>Continue research</h2>'+(items.length?items.join(' '):'<p>Your recently opened tasks, sources and notebook entries will appear here.</p>')+'</section>';
+}
+document.addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b||!state.user)return;const d=b.dataset;
+  if(b.hasAttribute('data-resume-draft')){labEntry.set(analysisDraft(),'work');goto('analysis');}
+  if(d.record)rememberResearch(d.record,Number(d.recordId));
+  else if(d.labFile||d.preview||d.reviewFile)rememberResearch('file',Number(d.labFile||d.preview||d.reviewFile));
+  else if(d.editNote)rememberResearch('note',Number(d.editNote));
+  else if(d.edit)rememberResearch('task',Number(d.edit));
+},true);
+document.addEventListener('change',e=>{if(['lab-saved','lab-source'].includes(e.target.id))rememberResearch('file',Number(e.target.value));});
 boot();
