@@ -1760,7 +1760,7 @@ function exportReport(format){
 function overviewAnalytics(){
   const rows=state.data.tasks;
   const bar=(label,list,attr)=>'<button class="rf-metric" '+attr+'><b>'+esc(label)+'</b><span class="rf-stack">'+statuses.map((s,i)=>'<i class="lane-'+i+'" style="width:'+(100*list.filter(t=>t.status===s).length/list.length)+'%"></i>').join('')+'</span><span>'+list.filter(t=>t.status==='Done').length+'/'+list.length+' done</span></button>';
-  return '<section class="card panel section-spacer"><h2>Progress by phase</h2>'+phases.filter(p=>rows.some(t=>t.phase===p)).map(p=>bar(p,rows.filter(t=>t.phase===p),'data-phase-drill="'+esc(p)+'"')).join('')+'<h3>Team workload</h3>'+state.data.members.map(m=>'<button class="tiny-btn" data-workload="'+m.id+'">'+esc(m.name)+' · '+rows.filter(t=>t.assignee_id===m.id&&t.status!=='Done').length+' open</button>').join(' ')+boardInsights()+'<details><summary>Relationship graph</summary>'+graphView()+'</details><div class="rf-tools">'+['Markdown','CSV','PDF','BibTeX'].map(f=>'<button class="tiny-btn" data-export="'+f+'">'+f+'</button>').join('')+'</div></section>';
+  return '<section class="card panel section-spacer"><h2>Progress by phase</h2>'+phases.filter(p=>rows.some(t=>t.phase===p)).map(p=>bar(p,rows.filter(t=>t.phase===p),'data-phase-drill="'+esc(p)+'"')).join('')+'<h3>Team workload</h3>'+state.data.members.map(m=>'<button class="tiny-btn" data-workload="'+m.id+'">'+esc(m.name)+' · '+rows.filter(t=>t.assignee_id===m.id&&t.status!=='Done').length+' open</button>').join(' ')+boardInsights()+focusedGraph()+'<div class="rf-tools">'+['Markdown','CSV','PDF','BibTeX'].map(f=>'<button class="tiny-btn" data-export="'+f+'">'+f+'</button>').join('')+'</div></section>';
 }
 function graphView(){
   const {tasks,files,notes,runs=[],dependencies=[]}=state.data;
@@ -2657,4 +2657,19 @@ function upcomingPanel(){
     (review.length?'<h3>Review work</h3><ul>'+links(review)+'</ul>':'')+
     (blocked.length?'<h3>Blockers</h3>'+blocked.map(([t,p])=>'<p>'+recordLink('task',t.id)+' · '+esc(t.assignee_name||'Unassigned')+' · '+(p.length?'Waiting on '+p.map(x=>recordLink('task',x.id)).join(' '):esc(t.description||'Open task to record the reason'))+'</p>').join(''):'<p>No open blockers.</p>')+'</section>';
 }
+let selectedConnection='';
+function focusedGraph(){
+  const {tasks,files,notes,runs=[],dependencies=[]}=state.data,nodes=new Map();
+  function add(kind,id,label){nodes.set(kind+':'+id,{kind,id,label,links:new Set()});}
+  function edge(a,b){if(nodes.has(a)&&nodes.has(b)){nodes.get(a).links.add(b);nodes.get(b).links.add(a);}}
+  tasks.forEach(t=>add('task',t.id,t.title));files.forEach(f=>add('file',f.id,f.original_name));notes.forEach(n=>add('note',n.id,n.body));
+  tasks.forEach(t=>(t.source_ids||[]).forEach(id=>edge('task:'+t.id,'file:'+id)));
+  notes.forEach(n=>{[n.task_id,...(n.task_ids||[])].forEach(id=>edge('note:'+n.id,'task:'+id));[n.source_id,...(n.source_ids||[])].forEach(id=>edge('note:'+n.id,'file:'+id));});
+  runs.forEach(r=>edge('task:'+r.task_id,'file:'+r.output_id));dependencies.forEach(d=>edge('task:'+d.successor,'task:'+d.predecessor));
+  const cur=nodes.get(selectedConnection)||nodes.values().next().value;
+  if(!cur)return '<h3>Connected research</h3><p>Add a research record to see connections.</p>';
+  const short=n=>(n.label||'Untitled').split('\n')[0].slice(0,68);
+  return '<section><h3>Connected research</h3><label>Focus record <select class="field" id="connection-focus">'+[...nodes].map(([k,n])=>'<option value="'+esc(k)+'" '+(n===cur?'selected':'')+'>'+esc(n.kind+' · '+short(n))+'</option>').join('')+'</select></label><p>'+esc((cur.label||'').slice(0,220))+'</p>'+recordLink(cur.kind,cur.id)+'<h4>Direct connections</h4>'+([...cur.links].map(k=>{const n=nodes.get(k);return recordLink(n.kind,n.id);}).join(' ')||'No linked records yet.')+'<details><summary>Explore full graph</summary>'+graphView()+'</details></section>';
+}
+document.addEventListener('change',e=>{if(e.target.id==='connection-focus'){selectedConnection=e.target.value;render();$('connection-focus').focus();}});
 boot();
