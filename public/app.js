@@ -271,20 +271,54 @@ function table(tasks, limit = 0) {
     .join('')}</tbody></table></div>`;
 }
 
+let nextWorkScope = 'mine';
+
+function nextWorkPanel() {
+  const mine = nextWorkScope === 'mine';
+  const tasks = state.data.tasks.filter(t => t.status !== 'Done' &&
+    (!mine || String(t.assignee_id) === String(state.user.id)));
+  tasks.sort((a,b) => String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')) ||
+    (a.title || '').localeCompare(b.title || ''));
+  const controls = '<div role="group" aria-label="Task scope">'+
+    [['mine','My work'],['team','Team work']].map(([key,label]) =>
+      '<button type="button" class="tiny-btn" data-next-work="'+key+'" aria-pressed="'+(key===nextWorkScope)+'">'+label+'</button>').join(' ')+'</div>';
+  const rows = tasks.map(t => {
+    const sources = (t.source_ids || []).map(id => recordLink('file',id)).filter(Boolean).join(' ');
+    return '<tr><th scope="row"><button class="text-link" data-edit="'+Number(t.id)+'">'+esc(t.title)+'</button></th>'+
+      '<td>'+esc(t.phase || '—')+'</td><td>'+esc(t.assignee_name || 'Unassigned')+'</td>'+
+      '<td>'+esc(t.due_date ? shortDate(t.due_date+'T12:00:00') : 'No due date')+'</td>'+
+      '<td>'+statusPill(t.status)+'</td><td>'+sources+relatedNotes('task_id',t.id)+'</td></tr>';
+  });
+  const body = rows.length ? '<div class="task-table-wrap"><table class="task-table"><thead><tr>'+
+    ['Task','Phase','Owner','Due','Status','Linked research'].map(label => '<th scope="col">'+label+'</th>').join('')+
+    '</tr></thead><tbody>'+rows.join('')+'</tbody></table></div>' :
+    '<p>'+(mine?'You have no assigned open tasks. Choose Team work to see the workspace queue.':'The team has no open tasks.')+'</p>';
+  return '<section class="card panel section-spacer"><div class="panel-heading"><h2>My next work</h2>'+controls+
+    '</div>'+body+'<button class="text-link" data-go="tasks">Open task board ↗</button></section>';
+}
+
+document.addEventListener('click',event => {
+  const control = event.target.closest('[data-next-work]');
+  if (!control || state.page !== 'overview') return;
+  nextWorkScope = control.dataset.nextWork === 'team' ? 'team' : 'mine';
+  render();
+  document.querySelector('[data-next-work="'+nextWorkScope+'"]')?.focus();
+});
+
 function overviewPage() {
   const tasks = state.data.tasks,
     done = tasks.filter(t => t.status === 'Done').length,
     active = tasks.filter(t => t.status === 'In progress').length,
     blocked = tasks.filter(t => t.status === 'Blocked').length,
     percent = tasks.length ? Math.round((100 * done) / tasks.length) : 0;
-  const current = tasks.filter(t => t.status !== 'Done');
   const f = state.data.files;
   const wsName = state.workspace?.name || 'Shared research workspace';
   return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
+ ${nextWorkPanel()}
  <div class="cards"><div class="card stat-card"><span class="stat-caption">Total research tasks</span><span class="stat-icon">▦</span><div class="stat-number">${tasks.length}</div><div class="stat-foot">Across ${new Set(tasks.map(t => t.phase)).size} active phases</div></div><div class="card stat-card"><span class="stat-caption">Completed</span><span class="stat-icon green">✓</span><div class="stat-number">${done}</div><div class="stat-foot">Tasks completed</div></div><div class="card stat-card"><span class="stat-caption">Currently active</span><span class="stat-icon orange">◷</span><div class="stat-number">${active}</div><div class="stat-foot">${blocked} task(s) blocked</div></div><div class="card stat-card"><span class="stat-caption">Research documents</span><span class="stat-icon purple">▤</span><div class="stat-number">${f.length}</div><div class="stat-foot">${f.filter(x => x.ai_review_data).length} analyzed for lit review</div></div></div>
  <div class="dashboard-grid"><section class="card panel"><div class="panel-heading">Project health <button class="text-link" data-go="tasks">View all tasks ↗</button></div><div class="progress-layout"><div class="donut" style="--percentage:${percent}%"><div class="donut-center"><strong>${percent}%</strong><small>COMPLETE</small></div></div><div class="progress-breakdown"><div class="key-row"><span class="key-label"><span class="key-dot green"></span> Completed</span><strong>${done}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot orange"></span> In progress</span><strong>${active}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot"></span> To do</span><strong>${tasks.filter(t => t.status === 'To do').length}</strong></div><div class="key-row"><span class="key-label"><span class="key-dot red"></span> Blocked</span><strong>${blocked}</strong></div></div></div><p class="small-text muted" style="margin:18px 0 0">Progress shows the share of tasks marked done.</p></section>
  <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Compare two primary sources">＋ Add reading task</button></div></section></div>
- ${overviewAnalytics()}<div class="two-col section-spacer"><section class="card panel"><div class="panel-heading">Priority tasks <button class="text-link" data-go="tasks">Open task board ↗</button></div>${table(current, 5)}</section><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
+ ${overviewAnalytics()}<div class="section-spacer"><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
 }
 
 function filteredTasks() {
