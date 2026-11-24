@@ -316,7 +316,7 @@ function overviewPage() {
   return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
  ${nextWorkPanel()}${continuePanel()}${upcomingPanel()}
  <section class="card panel section-spacer"><div class="panel-heading"><h2>Task completion</h2><button class="text-link" data-go="tasks">View task board</button></div><p><strong>${done} of ${tasks.length} tasks complete</strong> · ${percent}%</p><progress aria-label="Completed tasks" max="${tasks.length||1}" value="${done}"></progress></section><div class="section-spacer"> <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Compare two primary sources">＋ Add reading task</button></div></section></div>
- ${overviewAnalytics()}<div class="section-spacer"><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
+ ${overviewAnalytics()}<div class="section-spacer"><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${handoverActivity()}</section></div>`;
 }
 
 function filteredTasks() {
@@ -2672,4 +2672,14 @@ function focusedGraph(){
   return '<section><h3>Connected research</h3><label>Focus record <select class="field" id="connection-focus">'+[...nodes].map(([k,n])=>'<option value="'+esc(k)+'" '+(n===cur?'selected':'')+'>'+esc(n.kind+' · '+short(n))+'</option>').join('')+'</select></label><p>'+esc((cur.label||'').slice(0,220))+'</p>'+recordLink(cur.kind,cur.id)+'<h4>Direct connections</h4>'+([...cur.links].map(k=>{const n=nodes.get(k);return recordLink(n.kind,n.id);}).join(' ')||'No linked records yet.')+'<details><summary>Explore full graph</summary>'+graphView()+'</details></section>';
 }
 document.addEventListener('change',e=>{if(e.target.id==='connection-focus'){selectedConnection=e.target.value;render();$('connection-focus').focus();}});
+const visitCutoffs=new Map();let sinceVisit=false;
+function handoverActivity(){
+  const key=personalKey('visit');if(!visitCutoffs.has(key))visitCutoffs.set(key,readPersonal('visit',null));
+  const now=new Date().toISOString();writePersonal('visit',now);
+  const cutoff=visitCutoffs.get(key),groups=new Map();
+  for(const row of state.data.activities){if(sinceVisit&&cutoff&&new Date(row.created_at)<=new Date(cutoff))continue;
+    const k=[row.actor_name,row.record_kind,new Date(row.created_at).toLocaleDateString()].join('|');if(!groups.has(k))groups.set(k,[]);groups.get(k).push(row);}
+  return '<h3>Research handover</h3><label><input type="checkbox" id="since-visit" '+(sinceVisit?'checked':'')+'> Since my last visit</label>'+([...groups.values()].slice(0,8).map(g=>g.length===1?activityRows(g):'<details><summary>'+esc(g[0].actor_name||'Workspace')+' · '+g.length+' '+esc(g[0].record_kind||'workspace')+' updates · '+esc(new Date(g[0].created_at).toLocaleDateString())+'</summary>'+activityRows(g)+'</details>').join('')||'<p>No new activity.</p>');
+}
+document.addEventListener('change',e=>{if(e.target.id==='since-visit'){sinceVisit=e.target.checked;render();}});
 boot();
