@@ -314,7 +314,7 @@ function overviewPage() {
   const f = state.data.files;
   const wsName = state.workspace?.name || 'Shared research workspace';
   return `${pageHeading(esc(wsName.toUpperCase()) + ' · ' + new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase(), 'Good to see you, ' + state.user.name.split(' ')[0] + '.', 'Here is the current state of your shared research workspace.', `<button class="button secondary" data-go="team">↗ Invite / team</button><button class="button solid" data-new-task>＋ New task</button>`)}
- ${nextWorkPanel()}${continuePanel()}
+ ${nextWorkPanel()}${continuePanel()}${upcomingPanel()}
  <section class="card panel section-spacer"><div class="panel-heading"><h2>Task completion</h2><button class="text-link" data-go="tasks">View task board</button></div><p><strong>${done} of ${tasks.length} tasks complete</strong> · ${percent}%</p><progress aria-label="Completed tasks" max="${tasks.length||1}" value="${done}"></progress></section><div class="section-spacer"> <section class="agent-feature"><div class="eyebrow">✧ RESEARCH COPILOT</div><h3>Update work in seconds.</h3><p>Tell the agent what you accomplished. Review its proposed updates and apply them with one click.</p><form id="quick-form" class="agent-inline"><input name="message" placeholder="e.g. Completed literature synthesis for Section 2" required /><button type="submit">Send ↗</button></form><div class="suggestions"><button data-prompt="Show project progress">Summarize progress</button><button data-prompt="Add task: Compare two primary sources">＋ Add reading task</button></div></section></div>
  ${overviewAnalytics()}<div class="section-spacer"><section class="card panel"><div class="panel-heading">Latest activity <button class="text-link" data-go="activity">View timeline ↗</button></div>${activityRows(state.data.activities.slice(0, 5))}</section></div>`;
 }
@@ -2644,4 +2644,17 @@ document.addEventListener('click',e=>{
   else if(d.edit)rememberResearch('task',Number(d.edit));
 },true);
 document.addEventListener('change',e=>{if(['lab-saved','lab-source'].includes(e.target.id))rememberResearch('file',Number(e.target.value));});
+function upcomingPanel(){
+  const open=state.data.tasks.filter(t=>t.status!=='Done'),deps=state.data.dependencies||[];
+  const dated=open.filter(t=>t.due_date).sort((a,b)=>a.due_date.localeCompare(b.due_date));
+  const blocked=open.map(t=>[t,deps.filter(d=>d.successor===t.id).map(d=>open.find(x=>x.id===d.predecessor)).filter(Boolean)]).filter(([t,parents])=>parents.length||t.status==='Blocked');
+  const review=open.filter(t=>/review|revision/i.test(t.phase+' '+t.title));
+  const milestones=open.filter(t=>/milestone|deadline|submission|defen[cs]e/i.test(t.title));
+  const links=arr=>arr.map(t=>'<li>'+recordLink('task',t.id)+' · '+esc(t.due_date||'Unscheduled')+' · '+esc(t.assignee_name||'Unassigned')+'</li>').join('');
+  return '<section class="card panel section-spacer"><h2>Upcoming and decisions</h2>'+
+    (dated.length?'<h3>Upcoming due dates</h3><ul>'+links(dated)+'</ul>':'<p>No scheduled open tasks.</p>')+
+    (milestones.length?'<h3>Milestone tasks</h3><ul>'+links(milestones)+'</ul>':'')+
+    (review.length?'<h3>Review work</h3><ul>'+links(review)+'</ul>':'')+
+    (blocked.length?'<h3>Blockers</h3>'+blocked.map(([t,p])=>'<p>'+recordLink('task',t.id)+' · '+esc(t.assignee_name||'Unassigned')+' · '+(p.length?'Waiting on '+p.map(x=>recordLink('task',x.id)).join(' '):esc(t.description||'Open task to record the reason'))+'</p>').join(''):'<p>No open blockers.</p>')+'</section>';
+}
 boot();
